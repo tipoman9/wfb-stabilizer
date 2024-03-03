@@ -7,6 +7,13 @@
 import cv2
 import numpy as np
 import sys
+import subprocess
+import shlex
+import time
+
+import sys
+import os
+import struct
 
 # Usage: python ejo_wfb_stabilizer.py [optional video file]
 # press "Q" to quit
@@ -14,7 +21,7 @@ import sys
 #################### USER VARS ######################################
 # Decreases stabilization latency at the expense of accuracy. Set to 1 if no downsamping is desired. 
 # Example: downSample = 0.5 is half resolution and runs faster but gets jittery
-downSample = 1.0
+downSample = 1
 
 #Zoom in so you don't see the frame bouncing around. zoomFactor = 1 for no zoom
 zoomFactor = 0.9
@@ -37,7 +44,8 @@ delay_time = 1
 # roiDiv = ROI size divisor. Minimum functional divisor is about 3.0 at 720p input. 4.0 is best for solid stabilization.
 # Higher FPS and lower resolution can go higher in ROI (and probably should)
 # Set showrectROI and/or showUnstabilized vars to = 1 to see the area being processed. On slower PC's 3 might be required if 720p input
-roiDiv = 3.5
+#roiDiv = 3.5
+roiDiv = 3.0
 
 # set to 1 to show the ROI rectangle 
 showrectROI = 0
@@ -59,12 +67,66 @@ maskFrame = 0
 # Check the docs for your wifibroadcast variant and/or the Googles to figure out what to do. 
 
 # Below should work on most PC's with gstreamer  -- ###  #### #### Without hardware acceleration you may need to reduce your stream to 920x540 ish #### #### ###
-SRC = 'udpsrc port=5600 caps = "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96" ! rtph264depay ! decodebin ! videoconvert ! appsink sync=false'
+#SRC = 'udpsrc port=5600 caps = "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96" ! rtph264depay ! decodebin ! videoconvert ! appsink sync=false'
+
+#software decoding
+SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtph265depay ! avdec_h265 ! decodebin ! videoconvert ! appsink sync=false '
+
+SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 
 # Below is for author's Ubuntu PC with nvidia/cuda stuff running WFB-NG locally (no groundstation RPi). Requires a lot of fiddling around compiling opencv w/ cuda support
 #SRC = 'udpsrc port=5600 caps = "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96" ! rtph264depay !  h264parse ! nvh264dec ! videoconvert ! appsink sync=false'
 
 ######################################################################
+
+qOpenHD = 'gnome-terminal -e "/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD"'
+
+# Command string with quotes
+#command_string = 'gnome-terminal -e \'/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD\''
+#command_string = '/home/home/qopenhd.sh transparent'
+
+command_string = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
+
+# Split and escape the command string using shlex
+command_list = shlex.split(command_string)
+
+#Set qOpenHD params in transparent mode
+sed_commands = (
+    "sed -i 's/^dev_force_show_full_screen=.*/dev_force_show_full_screen=true/' /home/home/.config/OpenHD/QOpenHD.conf && "
+    "sed -i 's/^qopenhd_primary_video_rtp_input_port=.*/qopenhd_primary_video_rtp_input_port=5599/' /home/home/.config/OpenHD/QOpenHD.conf"
+)
+
+# Now you can use subprocess to run the combined sed commands
+subprocess.run(sed_commands, shell=True)
+
+def bring_to_foreground(process_id):
+    try:
+        subprocess.run(["wmctrl", "-ia", str(process_id)])
+    except Exception as e:
+        print(f"Error bringing window to foreground: {e}")
+process = None
+process_id = None 
+
+# Start your process
+# process = subprocess.Popen(command_list)
+# process.wait() # Wait for a moment to ensure the window is created
+# process_id = process.pid # Get the process ID (PID) of the last process
+# bring_to_foreground(process_id) # Bring the window to the foreground
+
+# try to keep CPU up
+try:
+    fd = os.open("/dev/cpu_dma_latency", os.O_WRONLY)
+except OSError as e:
+    print(f"Error opening /dev/cpu_dma_latency: {e}")     
+try:
+    os.write(fd, struct.pack("I", 0))
+except OSError as e:
+    print(f"Error writing to /dev/cpu_dma_latency: {e}")    
+finally:
+    #os.close(fd) #keep file open
+	print(f"Error opening /dev/cpu_dma_latency: {e}")     
+
+
 
 
 lk_params = dict( winSize  = (15,15),maxLevel = 3,criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
@@ -180,6 +242,8 @@ while True:
 			f_stabilized = cv2.bitwise_and(f_stabilized, f_stabilized, mask=mask)
 		if showFullScreen == 1:
 			cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
+			if process_id != None: 
+				bring_to_foreground(process_id) # Bring the window to the foreground
 		
 		cv2.imshow(window_name, f_stabilized)
 		
@@ -188,6 +252,13 @@ while True:
 		if cv2.waitKey(delay_time) & 0xFF == ord('q'):
 			break
 		
+		if process==None:
+			# Start your process
+			process = subprocess.Popen(command_list)
+			#process.wait() # Wait for a moment to ensure the window is created
+			time.sleep(1)
+			process_id = process.pid # Get the process ID (PID) of the last process
+			bring_to_foreground(process_id) # Bring the window to the foreground
 		
 		prevOrig = Orig
 		prevGray = currGray
@@ -200,3 +271,12 @@ while True:
 video.release()
  
 cv2.destroyAllWindows()
+
+
+process.terminate()
+ # Wait for an additional 5 seconds for the process to respond to the terminate signal
+try:
+    process.wait(timeout=1)
+except subprocess.TimeoutExpired:
+    # If the process is still running, forcefully kill it
+    process.kill()
