@@ -32,3 +32,13 @@ On a moderate PC, this should stabilize 720p @ 49fps (v1 camera max 720p fps) pr
     
 My groundstation PC has a nvidia gpu and opencv compiled with cuda support and can handle the stabilization demands at 720p. A lower-end PC may require running a lower resolution stream, lower fps, or adjusting the script to use a smaller ROI.
 
+## TipoMan EDIT 2024 
+Added s separate thread for video processing which increased performance by 25%.
+qOpenHD will be started and brought to foreground, so that OSD is drawn.
+Overloading and video jitter  won't cause total image loss.
+Hotkeys
+Space or S - Switch on/off stabilized mode
+ESC or Q - exit and close qOpenHD
+
+On a i3-1215u can stabilize 1920x1080 at 50fps (30fps on Battery power), while recording h264 30fps video from the screen.
+

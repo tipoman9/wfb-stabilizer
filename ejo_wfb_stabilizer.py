@@ -3,6 +3,7 @@
 # Version 0.00000000001 Proof of Concept Released 4/3/2023
 # Open Source -- Do what you wanna do
 # Thanks to https://github.com/trongphuongpro/videostabilizer 
+# 2024 improved by TipoMan9
 
 import cv2
 import numpy as np
@@ -15,27 +16,12 @@ import sys
 import os
 import struct
 import psutil
+import threading
+import queue
+import os
+import signal
 
-
-def set_cpu_affinity(core_number):
-    pid = os.getpid()
-    p = psutil.Process(pid)
-
-    try:
-        # Get the list of available CPU cores
-        available_cores = list(range(psutil.cpu_count()))
-
-        # Check if the specified core_number is valid
-        if core_number not in available_cores:
-            raise ValueError(f"Invalid core number. Available cores: {available_cores}")
-
-        # Set the CPU affinity to the specified core
-        p.cpu_affinity([core_number])
-        print(f"CPU affinity set to core {core_number}")
-
-    except Exception as e:
-        print(f"Error: {e}")
-
+from pynput import keyboard
 
 # Usage: python ejo_wfb_stabilizer.py [optional video file]
 # press "Q" to quit
@@ -46,7 +32,7 @@ def set_cpu_affinity(core_number):
 downSample = 1
 
 #Zoom in so you don't see the frame bouncing around. zoomFactor = 1 for no zoom
-zoomFactor = 0.9
+zoomFactor = 1 #0.9
 
 # pV and mV can be increased for more smoothing #### start with pV = 0.01 and mV = 2 
 processVar=0.03
@@ -54,7 +40,7 @@ measVar=2
 
 # set to 1 to display full screen -- doesn't actually go full screen if your monitor rez is higher than stream rez which it probably is. TODO: monitor resolution detection
 #showFullScreen = 1
-showFullScreen = 0
+showFullScreen = 1
 
 # If test video plays too fast then increase this until it looks close enough. Varies with hardware. 
 # LEAVE AT 1 if streaming live video from WFB (unless you like a delay in your stream for some weird reason)
@@ -84,6 +70,13 @@ showUnstabilized = 0
 # Feels more like a windshield. Set to 0 to disable or find the variable down in the code to adjust size of mask
 maskFrame = 0
 
+#raise to stop the program
+AbortNow=False
+
+#Switch on/off
+enableStabization=True
+
+
 ######################## Video Source ###############################
 
 # Your stream source. Requires gstreamer libraries 
@@ -94,8 +87,9 @@ maskFrame = 0
 #SRC = 'udpsrc port=5600 caps = "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96" ! rtph264depay ! decodebin ! videoconvert ! appsink sync=false'
 
 #software decoding
-SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtph265depay ! avdec_h265 ! decodebin ! videoconvert ! appsink sync=false '
+#SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtph265depay ! avdec_h265 ! decodebin ! videoconvert ! appsink sync=false '
 
+#Hardware decoding on a Intel CPU
 SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 
 # Below is for author's Ubuntu PC with nvidia/cuda stuff running WFB-NG locally (no groundstation RPi). Requires a lot of fiddling around compiling opencv w/ cuda support
@@ -103,24 +97,76 @@ SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string
 
 ######################################################################
 
-qOpenHD = 'gnome-terminal -e "/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD"'
-
 
 # Command string with quotes
 #command_string = 'gnome-terminal -e \'/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD\''
 #command_string = '/home/home/qopenhd.sh transparent'
 
-command_string = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
+#Path to qOpenHD to start it and bring it to front to get OSD , empty if not
+qOpenHDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
+#qOpenHDexecutable = ""
 
-# Split and escape the command string using shlex
-command_list = shlex.split(command_string)
+qOpenHDdir='/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/'
 
-#Set qOpenHD params in transparent mode
-sed_commands = (
-    "sed -i 's/^dev_force_show_full_screen=.*/dev_force_show_full_screen=true/' /home/home/.config/OpenHD/QOpenHD.conf && "
+
+
+#Set qOpenHD params to transparent mode, no video
+sed_commands = (#set qOpenHD to h264 to free cpu
+	"sed -i 's/^qopenhd_primary_video_codec=.*/qopenhd_primary_video_codec=0/' /home/home/.config/OpenHD/QOpenHD.conf &&"
+    "sed -i 's/^dev_force_show_full_screen=.*/dev_force_show_full_screen=true/' /home/home/.config/OpenHD/QOpenHD.conf &&"
     "sed -i 's/^qopenhd_primary_video_rtp_input_port=.*/qopenhd_primary_video_rtp_input_port=5599/' /home/home/.config/OpenHD/QOpenHD.conf"
 )
+ 
+subprocess.run(sed_commands, shell=True)
 
+#not needed , tested only
+def set_cpu_affinity(core_number):
+    pid = os.getpid()
+    p = psutil.Process(pid)
+
+    try:
+        # Get the list of available CPU cores
+        available_cores = list(range(psutil.cpu_count()))
+
+        # Check if the specified core_number is valid
+        if core_number not in available_cores:
+            raise ValueError(f"Invalid core number. Available cores: {available_cores}")
+
+        # Set the CPU affinity to the specified core
+        p.cpu_affinity([core_number])
+        print(f"CPU affinity set to core {core_number}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+#Global key hook handler
+def on_press(key):
+	global AbortNow, enableStabization
+	try:
+		#print(f'Key {key.char} pressed')
+		if key.char.lower() == 'q' or key == keyboard.Key.esc: 
+			AbortNow = True
+		if key.char.lower() == 's' or key == keyboard.Key.space: 
+			enableStabization = not enableStabization
+	except AttributeError:
+		print(f'Special key {key} pressed')
+		if key == keyboard.Key.space: 
+			enableStabization = not enableStabization
+		if key == keyboard.Key.esc:
+			AbortNow = True
+
+
+def on_release(key):
+    if key == keyboard.Key.esc:
+        # Stop listener
+        return False
+
+# Global key hook init
+listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+listener.start()
+
+# Statistics record	
 class PerfCounter:
     def __init__(self, name, value):
         self.name = name        
@@ -140,20 +186,21 @@ class PerfCounter:
         self.ttl+=value
         self.avg=self.ttl/self.count
 			
-# Create an empty dictionary
 perfs = {}
 
-# Now you can use subprocess to run the combined sed commands
-subprocess.run(sed_commands, shell=True)
-
 lastticks=time.time()
-
+dropped_frames=0
+dropped_frames_screen=0
 showdebug=1
 currentstep=0
+fps=""
 procstart=time.time()
+stab_load_screen=0
 
+
+#display debug info in console
 def i(str, step=0):
-	global lastticks,currentstep,procstart, perfs
+	global lastticks,currentstep,procstart, perfs, dropped_frames_screen, dropped_frames,stab_load_screen, fps
 	suffix=""
 	if showdebug==1 :
 		if step==1 :
@@ -163,7 +210,13 @@ def i(str, step=0):
 					#print(f"Counter {index + 1}: {key}")
 					print(f"{key}"+ " : " + value.name[:20].ljust(20) + " min:" + f"{value.min*1000:.1f}" 
 					+ " max:" + f"{value.max*1000:.1f}".ljust(6) + " avg:" + f"{value.avg*1000:.1f}".ljust(6)) 
-				perfs = {}				    
+				 
+				dropped_frames_screen=	dropped_frames
+				dropped_frames=0
+				stab_load_screen =  round(100*(30 - perfs[2].avg*1000) /30,0) # Frame_time - free time/Frame_time
+				fps=f"{perfs[1].count}"
+				perfs = {}
+
 
 			currentstep=1			
 			diff=time.time() - procstart * 1000
@@ -175,6 +228,7 @@ def i(str, step=0):
 		global lastticks
 		elapsed=time.time()-lastticks
 		lastticks=time.time()
+		#uncomment for details in console
 		#print(f"{currentstep}"+ " : " + str + " = " + f"{elapsed*1000}") #//f"debug_step:8 : {time.time():.4f}")
 		p = PerfCounter(str, round(elapsed * 1000))
 		if currentstep in perfs:			
@@ -184,6 +238,19 @@ def i(str, step=0):
 		
 		#print(f"{currentstep} : {str[:20].ljust(20)} = {elapsed * 1000:.1f}" + suffix)
 
+#Draw simple text over image
+def drawtext(surface, str, x, y):
+	# Add text to the image
+	text = "Hello, OpenCV!"
+	font = cv2.FONT_HERSHEY_SIMPLEX
+	position = (x, y)  # (x, y) coordinates of the top-left corner of the text
+	font_scale = 0.6
+	font_color = (255, 255, 255)  # BGR color (white in this case)
+	thickness = 1
+
+	cv2.putText(surface, str, position, font, font_scale, font_color, thickness)
+
+
 def bring_to_foreground(process_id):
     try:
         subprocess.run(["wmctrl", "-ia", str(process_id)])
@@ -192,29 +259,6 @@ def bring_to_foreground(process_id):
 
 process = None
 process_id = None 
-
-# Start your process
-# process = subprocess.Popen(command_list)
-# process.wait() # Wait for a moment to ensure the window is created
-# process_id = process.pid # Get the process ID (PID) of the last process
-# bring_to_foreground(process_id) # Bring the window to the foreground
-
-# try to keep CPU up
-# try:
-#     fd = os.open("/dev/cpu_dma_latency", os.O_WRONLY)
-# except OSError as e:
-#     print(f"Error opening /dev/cpu_dma_latency: {e}")     
-# try:
-#     #os.write(fd, struct.pack("I", 0))
-#     print(f"SKIPPED...")     
-# except OSError as e:
-#     print(f"Error writing to /dev/cpu_dma_latency: {e}")    
-# finally:
-#     #os.close(fd) #keep file open
-# 	print(f"/dev/cpu_dma_latency: Opened!")     
-
-#set_cpu_affinity(1)
-
 
 lk_params = dict( winSize  = (15,15),maxLevel = 3,criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 count = 0
@@ -233,15 +277,62 @@ if len(sys.argv) == 2:
 
 video = cv2.VideoCapture(SRC)
 
+#MultiThread gives 30% performance increase !
+SingleThread=False
+
+#vvvvv  --- Displaying in separate thread! ---- vvvv
+window_name=""
+frame_queue = queue.Queue()
+def display_frames(frame_queue):
+	global window_name, process_id, AbortNow
+	while True:
+		if not frame_queue.empty():
+			frame = frame_queue.get()
+			cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)
+					
+			if showFullScreen == 1:
+				cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
+				if process_id != None: 
+					bring_to_foreground(process_id) # Bring the window to the foreground		
+			
+			cv2.imshow(window_name, frame)
+		key = cv2.waitKey(1)
+		if (key & 0xFF == ord('q')) or AbortNow :
+			break
+
+frame_queue = queue.Queue()
+if not SingleThread:
+	display_thread = threading.Thread(target=display_frames, args=(frame_queue,))
+    
+	display_thread.start()
+# ^^^^^^^^ Displaying in separate thread!  ^^^^^^^^^
+ttlwaited=0
+frames_ttl=0
 while True:	
 	#grab, frame = video.read()
 	i(f"Frame start",1)   #debug_step:1 : {time.time():.3f}
-	while not video.grab():
-		i("No frame grabbed, trying again...")
+	startedwaiting4frame=time.time()
+	overloaded=True;
+	frames_ttl+=1
 
-	i(f"Grabbed ")
-
-	grab, frame = video.retrieve()
+	# this will skip frames if we do not wait at least 1ms for them!
+	# this way we wont get distorted video!
+	while overloaded :
+		overloaded=False;
+		while not video.grab():
+			i("No frame grabbed, trying again...")
+		waited=(time.time()-startedwaiting4frame)*1000
+		if waited<0.3 and frames_ttl>50 : # if frame awaits us, we are too slow			
+			ttlwaited+=1
+			if ttlwaited>2: # If we have three successive frames that we were not able to handle...
+				overloaded=True	
+				dropped_frames+=1
+				print(f"Skipped frame {waited:.1f}")
+		else:			
+			ttlwaited=0
+		i(f"Grabbed ")	
+		grab, frame = video.retrieve() # Receive or discard
+			
 
 	i(f"retrieved")
 
@@ -267,105 +358,128 @@ while True:
 		prevGray = currGray
 	
 	if (grab == True) & (prevFrame is not None):
-		if showrectROI == 1:
-			cv2.rectangle(prevOrig,(top_left[1],top_left[0]),(bottom_right[1],bottom_right[0]),color = (211,211,211),thickness = 1)
-		# Not in use, save for later
-		#gfftmask = np.zeros_like(currGray)
-		#gfftmask[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1]] = 255
-		i(f"converted to gray")
-		#prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.01,minDistance=30,blockSize=3)
-		prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.1,minDistance=7,blockSize=3)
-		i(f"goodFeaturesToTrack")
-		if prevPts is not None:
-			currPts, status, err = cv2.calcOpticalFlowPyrLK(prevGray,currGray,prevPts,None,**lk_params)
-			i(f"calcOpticalFlowPyrLK")
-			assert prevPts.shape == currPts.shape
-			idx = np.where(status == 1)[0]
-			# Add orig video resolution pts to roi pts
-			prevPts = prevPts[idx] + np.array([int(res_w_orig/roiDiv),int(res_h_orig/roiDiv)]) 
-			currPts = currPts[idx] + np.array([int(res_w_orig/roiDiv),int(res_h_orig/roiDiv)])
-			if showTrackingPoints == 1:
-				for pT in prevPts:
-					cv2.circle(prevOrig, (int(pT[0][0]),int(pT[0][1])) ,5,(211,211,211))
-			if prevPts.size & currPts.size:
-				m, inliers = cv2.estimateAffinePartial2D(prevPts, currPts)
-			if m is None:
-				m = lastRigidTransform
-			# Smoothing
-			dx = m[0, 2]
-			dy = m[1, 2]
-			da = np.arctan2(m[1, 0], m[0, 0])
-		else:
-			dx = 0
-			dy = 0
-			da = 0
 
-		x += dx
-		y += dy
-		a += da
-		Z = np.array([[x, y, a]], dtype="float")
-		if count == 0:
-			X_estimate = np.zeros((1,3), dtype="float")
-			P_estimate = np.ones((1,3), dtype="float")
-		else:
-			X_predict = X_estimate
-			P_predict = P_estimate + Q
-			K = P_predict / (P_predict + R)
-			X_estimate = X_predict + K * (Z - X_predict)
-			P_estimate = (np.ones((1,3), dtype="float") - K) * P_predict
-			K_collect.append(K)
-			P_collect.append(P_estimate)
-		diff_x = X_estimate[0,0] - x
-		diff_y = X_estimate[0,1] - y
-		diff_a = X_estimate[0,2] - a
-		dx += diff_x
-		dy += diff_y
-		da += diff_a
-		m = np.zeros((2,3), dtype="float")
-		m[0,0] = np.cos(da)
-		m[0,1] = -np.sin(da)
-		m[1,0] = np.sin(da)
-		m[1,1] = np.cos(da)
-		m[0,2] = dx
-		m[1,2] = dy
+		if  enableStabization :
+			if showrectROI == 1:
+				cv2.rectangle(prevOrig,(top_left[1],top_left[0]),(bottom_right[1],bottom_right[0]),color = (211,211,211),thickness = 1)
+			# Not in use, save for later
+			#gfftmask = np.zeros_like(currGray)
+			#gfftmask[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1]] = 255
+			i(f"converted to gray")
+			#prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.01,minDistance=30,blockSize=3)
+			prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.1,minDistance=7,blockSize=3)
+			i(f"goodFeaturesToTrack")
+			if prevPts is not None:
+				currPts, status, err = cv2.calcOpticalFlowPyrLK(prevGray,currGray,prevPts,None,**lk_params)
+				i(f"calcOpticalFlowPyrLK")
+				assert prevPts.shape == currPts.shape
+				idx = np.where(status == 1)[0]
+				# Add orig video resolution pts to roi pts
+				prevPts = prevPts[idx] + np.array([int(res_w_orig/roiDiv),int(res_h_orig/roiDiv)]) 
+				currPts = currPts[idx] + np.array([int(res_w_orig/roiDiv),int(res_h_orig/roiDiv)])
+				if showTrackingPoints == 1:
+					for pT in prevPts:
+						cv2.circle(prevOrig, (int(pT[0][0]),int(pT[0][1])) ,5,(211,211,211))
+				if prevPts.size & currPts.size:
+					m, inliers = cv2.estimateAffinePartial2D(prevPts, currPts)
+				if m is None:
+					m = lastRigidTransform
+				# Smoothing
+				dx = m[0, 2]
+				dy = m[1, 2]
+				da = np.arctan2(m[1, 0], m[0, 0])
+			else:
+				dx = 0
+				dy = 0
+				da = 0
 
-		fS = cv2.warpAffine(prevOrig, m, (res_w_orig,res_h_orig)) # apply magic stabilizer sauce to frame
-		s = fS.shape
-		T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, zoomFactor)
-		f_stabilized = cv2.warpAffine(fS, T, (s[1], s[0]))
+			x += dx
+			y += dy
+			a += da
+			Z = np.array([[x, y, a]], dtype="float")
+			if count == 0:
+				X_estimate = np.zeros((1,3), dtype="float")
+				P_estimate = np.ones((1,3), dtype="float")
+			else:
+				X_predict = X_estimate
+				P_predict = P_estimate + Q
+				K = P_predict / (P_predict + R)
+				X_estimate = X_predict + K * (Z - X_predict)
+				P_estimate = (np.ones((1,3), dtype="float") - K) * P_predict
+				K_collect.append(K)
+				P_collect.append(P_estimate)
+			diff_x = X_estimate[0,0] - x
+			diff_y = X_estimate[0,1] - y
+			diff_a = X_estimate[0,2] - a
+			dx += diff_x
+			dy += diff_y
+			da += diff_a
+			m = np.zeros((2,3), dtype="float")
+			m[0,0] = np.cos(da)
+			m[0,1] = -np.sin(da)
+			m[1,0] = np.sin(da)
+			m[1,1] = np.cos(da)
+			m[0,2] = dx
+			m[1,2] = dy
+			
+			fS = cv2.warpAffine(prevOrig, m, (res_w_orig,res_h_orig)) # apply magic stabilizer sauce to frame
+			i(f"warpAffine passed")
+			s = fS.shape
+			T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, zoomFactor)		
+			f_stabilized = cv2.warpAffine(fS, T, (s[1], s[0]))
+
+			i(f"warpAffine2 passed")
+		else :
+			f_stabilized=Orig
+
 		window_name=f'Stabilized:{res_w}x{res_h}'
-		cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)
+		drawtext(f_stabilized, f"FPS:"+fps,240,20)
+		drawtext(f_stabilized, f"Dropped:{dropped_frames_screen}",320,20)
+		drawtext(f_stabilized, f"Load: {stab_load_screen:.0f}%",440,20)
 		
-		if maskFrame == 1:
-			mask = np.zeros(f_stabilized.shape[:2], dtype="uint8")
-			cv2.rectangle(mask, (100, 200), (1180, 620), 255, -1)
-			f_stabilized = cv2.bitwise_and(f_stabilized, f_stabilized, mask=mask)
-		if showFullScreen == 1:
-			cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
-			if process_id != None: 
-				bring_to_foreground(process_id) # Bring the window to the foreground
+		drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else " OFF"),580,20)
 		
 		i(f"Frame ready")
-		cv2.imshow(window_name, f_stabilized)
-		i(f"imshow completed")
+		if SingleThread:		
+			cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)
+		
+			if maskFrame == 1:
+				mask = np.zeros(f_stabilized.shape[:2], dtype="uint8")
+				cv2.rectangle(mask, (100, 200), (1180, 620), 255, -1)
+				f_stabilized = cv2.bitwise_and(f_stabilized, f_stabilized, mask=mask)
+			if showFullScreen == 1:
+				cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
+				if process_id != None: 
+					bring_to_foreground(process_id) # Bring the window to the foreground						
+				
+			cv2.imshow(window_name, f_stabilized)
+			i(f"imshow completed")		
+			if showUnstabilized == 1:
+				cv2.imshow("Unstabilized ROI",prevGray)
 
-		if showUnstabilized == 1:
-			cv2.imshow("Unstabilized ROI",prevGray)
-
-		#this will wait much more than 1 second and will cause CPU to go into idle state!!!	
-		#if cv2.waitKey(delay_time) & 0xFF == ord('q'):
-		if cv2.pollKey() & 0xFF == ord('q'):
-			break
+			
+			#if cv2.waitKey(delay_time) & 0xFF == ord('q'):
+			if cv2.pollKey() & 0xFF == ord('q') or AbortNow:
+				break
+		else :
+			frame_queue.put(f_stabilized)
+			if not display_thread.is_alive():
+				print(f"Exiting...")
+				break
 
 		i(f"Cycle completed")
 
 		if process==None  and showFullScreen == 1:
 			# Start your process
-			process = subprocess.Popen(command_list)
-			#process.wait() # Wait for a moment to ensure the window is created
-			time.sleep(1) 
-			process_id = process.pid # Get the process ID (PID) of the last process			
-			bring_to_foreground(process_id) # Bring the window to the foreground
+			if qOpenHDexecutable!="":
+				process = subprocess.Popen(qOpenHDexecutable)
+				# run qOpenHD as a local user so that config is in ~/.config/qOpenHD
+				#process = subprocess.Popen(['sudo', '-u', "home", qOpenHDexecutable])
+				#process.wait(100) # Wait for a moment to ensure the window is created
+				
+				time.sleep(1) 
+				process_id = process.pid # Get the process ID (PID) of the last process			
+				bring_to_foreground(process_id) # Bring the window to the foreground
 		
 		prevOrig = Orig
 		prevGray = currGray
@@ -380,13 +494,21 @@ video.release()
 cv2.destroyAllWindows()
 
 if process is not None:
-    process.terminate()
-    # Wait for an additional 5 seconds for the process to respond to the terminate signal
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        # If the process is still running, forcefully kill it
-        process.kill()
+	process.terminate()
+	# Wait for an additional 5 seconds for the process to respond to the terminate signal
+	try:
+		process.wait(timeout=2)
+	except subprocess.TimeoutExpired:
+		# If the process is still running, forcefully kill it
+		#process.kill()
+		#os.killpg(process.pid, signal.SIGTERM)  # Or signal.SIGKILL		
+		# When you need to terminate the process
+		kill_command = ['sudo', 'killall -9 qOpenHD']
+		subprocess.run(kill_command)
+		os.killpg(process.pid, signal.SIGKILL)  # Or signal.SIGKILL		
+
 else:
     print("No qOpenHD to close!")
+
+print("End.")
 
