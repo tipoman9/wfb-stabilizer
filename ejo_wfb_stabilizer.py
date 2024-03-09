@@ -35,8 +35,11 @@ downSample = 1
 zoomFactor = 1 #0.9
 
 # pV and mV can be increased for more smoothing #### start with pV = 0.01 and mV = 2 
+#processVar=0.03
+#measVar=2
+
 processVar=0.03
-measVar=2
+measVar=4
 
 # set to 1 to display full screen -- doesn't actually go full screen if your monitor rez is higher than stream rez which it probably is. TODO: monitor resolution detection
 #showFullScreen = 1
@@ -245,7 +248,7 @@ def drawtext(surface, str, x, y):
 	font = cv2.FONT_HERSHEY_SIMPLEX
 	position = (x, y)  # (x, y) coordinates of the top-left corner of the text
 	font_scale = 0.6
-	font_color = (255, 255, 255)  # BGR color (white in this case)
+	font_color = (64, 64, 255)  # BGR color (white in this case)
 	thickness = 1
 
 	cv2.putText(surface, str, position, font, font_scale, font_color, thickness)
