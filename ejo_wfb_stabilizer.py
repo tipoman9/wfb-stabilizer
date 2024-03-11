@@ -39,7 +39,7 @@ zoomFactor = 1 #0.9
 #measVar=2
 
 processVar=0.03
-measVar=4
+measVar=2
 
 # set to 1 to display full screen -- doesn't actually go full screen if your monitor rez is higher than stream rez which it probably is. TODO: monitor resolution detection
 #showFullScreen = 1
@@ -79,6 +79,11 @@ AbortNow=False
 #Switch on/off
 enableStabization=True
 
+#Max deflection of the image as a percentage of screen. Prevents screen going away when video suddenly drops. Usually between : 0.2 to 0.5
+max_windows_offset = 0.3
+
+#How much to crop and put a black border so that image bouncing is less visible
+cropping_percent=0
 
 ######################## Video Source ###############################
 
@@ -145,19 +150,25 @@ def set_cpu_affinity(core_number):
 
 #Global key hook handler
 def on_press(key):
-	global AbortNow, enableStabization
+	global AbortNow, enableStabization, cropping_percent
 	try:
 		#print(f'Key {key.char} pressed')
 		if key.char.lower() == 'q' or key == keyboard.Key.esc: 
 			AbortNow = True
 		if key.char.lower() == 's' or key == keyboard.Key.space: 
 			enableStabization = not enableStabization
+		if key.char.lower() == 'b' or key == keyboard.Key.tab: 
+			cropping_percent =  5 if cropping_percent == 0 else 0
+
 	except AttributeError:
 		print(f'Special key {key} pressed')
 		if key == keyboard.Key.space: 
 			enableStabization = not enableStabization
 		if key == keyboard.Key.esc:
 			AbortNow = True
+		if key == keyboard.Key.tab: 
+			cropping_percent =  5 if cropping_percent == 0 else 0
+			print("Crooping : {cropping_percent}")
 
 
 def on_release(key):
@@ -252,6 +263,35 @@ def drawtext(surface, str, x, y):
 	thickness = 1
 
 	cv2.putText(surface, str, position, font, font_scale, font_color, thickness)
+
+# A basic attempt to do cropping, may slow down, needs optimization
+def crop_and_overlay(frame, margin_percent=5):
+    # Assuming 'frame' is your original frame    
+
+    # Calculate dimensions for the margin crop
+    margin_height = int(frame.shape[0] * (margin_percent / 100))
+    margin_width = int(frame.shape[1] * (margin_percent / 100))
+
+    # Calculate dimensions for the center region
+    center_height = frame.shape[0] - 2 * margin_height
+    center_width = frame.shape[1] - 2 * margin_width
+
+    # Create a black background frame with the original dimensions
+    black_frame = np.zeros((frame.shape[0], frame.shape[1], 3), dtype=np.uint8)
+
+    # Crop the frame with a margin and center the result
+    cropped_frame = frame[margin_height:margin_height + center_height,
+                                     margin_width:margin_width + center_width]
+
+    # Calculate the position to place the cropped frame in the center of the black frame
+    position_y = (frame.shape[0] - center_height) // 2
+    position_x = (frame.shape[1] - center_width) // 2
+
+    # Overlay the cropped frame onto the black frame
+    black_frame[position_y:position_y + center_height,
+                position_x:position_x + center_width] = cropped_frame
+
+    return black_frame
 
 
 def bring_to_foreground(process_id):
@@ -370,7 +410,7 @@ while True:
 			#gfftmask[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1]] = 255
 			i(f"converted to gray")
 			#prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.01,minDistance=30,blockSize=3)
-			prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.1,minDistance=7,blockSize=3)
+			prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.01,minDistance=30,blockSize=3)
 			i(f"goodFeaturesToTrack")
 			if prevPts is not None:
 				currPts, status, err = cv2.calcOpticalFlowPyrLK(prevGray,currGray,prevPts,None,**lk_params)
@@ -399,6 +439,12 @@ while True:
 			x += dx
 			y += dy
 			a += da
+
+			#Trying to avoid screen going too far away :)
+			if abs(dx)>res_w_orig * max_windows_offset or abs(dy)>res_h_orig * max_windows_offset:				
+				print("Out of view : {dx}:{dy}") ; dx = 0 ; dy = 0 ; da = 0 ; x = 0 ; y = 0 ;a = 0 				
+				X_estimate = np.zeros((1,3), dtype="float") ; P_estimate = np.ones((1,3), dtype="float") ;prevPts=None
+
 			Z = np.array([[x, y, a]], dtype="float")
 			if count == 0:
 				X_estimate = np.zeros((1,3), dtype="float")
@@ -430,6 +476,33 @@ while True:
 			s = fS.shape
 			T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, zoomFactor)		
 			f_stabilized = cv2.warpAffine(fS, T, (s[1], s[0]))
+
+			# # Calculate dimensions for 5% margin crop
+			# margin_percent = 5
+			# margin_height = int(s[0] * (margin_percent / 100))
+			# margin_width = int(s[1] * (margin_percent / 100))
+
+			# # Calculate dimensions for the center region
+			# center_height = s[0] - 2 * margin_height
+			# center_width = s[1] - 2 * margin_width
+
+			# # Create a black background frame with the original dimensions
+			# black_frame = np.zeros((s[0], s[1], 3), dtype=np.uint8)
+
+			# # Crop the frame with a 5% margin and centered
+			# cropped_frame = f_stabilized[margin_height : margin_height + center_height,
+			# 							margin_width : margin_width + center_width]
+
+			# # Calculate the position to place the cropped frame in the center of the black frame
+			# position_y = (s[0] - center_height) // 2
+			# position_x = (s[1] - center_width) // 2
+
+			# # Overlay the cropped frame onto the black frame
+			# black_frame[position_y : position_y + center_height,
+			# 		position_x : position_x + center_width] = cropped_frame
+			# f_stabilized=black_frame
+			if cropping_percent>0:
+				f_stabilized = crop_and_overlay(f_stabilized,cropping_percent)
 
 			i(f"warpAffine2 passed")
 		else :
