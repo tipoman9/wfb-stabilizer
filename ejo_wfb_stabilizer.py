@@ -3,7 +3,7 @@
 # Version 0.00000000001 Proof of Concept Released 4/3/2023
 # Open Source -- Do what you wanna do
 # Thanks to https://github.com/trongphuongpro/videostabilizer 
-# 2024 improved by TipoMan9
+# 2024  improved by TipoMan9
 
 import cv2
 import numpy as np
@@ -27,23 +27,27 @@ from pynput import keyboard
 # press "Q" to quit
 
 #################### USER VARS ######################################
+
+# set to 1 to display full screen -- doesn't actually go full screen if your monitor rez is higher than stream rez which it probably is. TODO: monitor resolution detection
+# showFullScreen = 1
+showFullScreen = 1
+
 # Decreases stabilization latency at the expense of accuracy. Set to 1 if no downsamping is desired. 
 # Example: downSample = 0.5 is half resolution and runs faster but gets jittery
+#downSample = 1
 downSample = 1
 
 #Zoom in so you don't see the frame bouncing around. zoomFactor = 1 for no zoom
 zoomFactor = 1 #0.9
 
 # pV and mV can be increased for more smoothing #### start with pV = 0.01 and mV = 2 
-#processVar=0.03
-#measVar=2
-
 processVar=0.03
 measVar=2
 
-# set to 1 to display full screen -- doesn't actually go full screen if your monitor rez is higher than stream rez which it probably is. TODO: monitor resolution detection
-#showFullScreen = 1
-showFullScreen = 1
+#for downSample = 0.5
+#processVar=0.010
+#measVar=8
+
 
 # If test video plays too fast then increase this until it looks close enough. Varies with hardware. 
 # LEAVE AT 1 if streaming live video from WFB (unless you like a delay in your stream for some weird reason)
@@ -59,6 +63,7 @@ delay_time = 1
 # Set showrectROI and/or showUnstabilized vars to = 1 to see the area being processed. On slower PC's 3 might be required if 720p input
 #roiDiv = 3.5
 roiDiv = 3.5
+
 
 # set to 1 to show the ROI rectangle 
 showrectROI = 0
@@ -147,10 +152,10 @@ def set_cpu_affinity(core_number):
     except Exception as e:
         print(f"Error: {e}")
 
-
+ScaleModeRequest=downSample
 #Global key hook handler
 def on_press(key):
-	global AbortNow, enableStabization, cropping_percent
+	global AbortNow, enableStabization, cropping_percent,ScaleModeRequest
 	try:
 		#print(f'Key {key.char} pressed')
 		if key.char.lower() == 'q' or key == keyboard.Key.esc: 
@@ -159,17 +164,16 @@ def on_press(key):
 			enableStabization = not enableStabization
 		if key.char.lower() == 'b' or key == keyboard.Key.tab: 
 			cropping_percent =  5 if cropping_percent == 0 else 0
-
+			print("Crooping : {cropping_percent}")
 	except AttributeError:
 		print(f'Special key {key} pressed')
 		if key == keyboard.Key.space: 
 			enableStabization = not enableStabization
 		if key == keyboard.Key.esc:
 			AbortNow = True
-		if key == keyboard.Key.tab: 
-			cropping_percent =  5 if cropping_percent == 0 else 0
-			print("Crooping : {cropping_percent}")
-
+		if key == keyboard.Key.tab: 			
+			ScaleModeRequest = 0.5 if ScaleModeRequest == 1 else 1
+			
 
 def on_release(key):
     if key == keyboard.Key.esc:
@@ -259,7 +263,7 @@ def drawtext(surface, str, x, y):
 	font = cv2.FONT_HERSHEY_SIMPLEX
 	position = (x, y)  # (x, y) coordinates of the top-left corner of the text
 	font_scale = 0.6
-	font_color = (64, 64, 255)  # BGR color (white in this case)
+	font_color = (0, 0, 255)  # BGR color (white in this case)
 	thickness = 1
 
 	cv2.putText(surface, str, position, font, font_scale, font_color, thickness)
@@ -351,6 +355,31 @@ if not SingleThread:
 # ^^^^^^^^ Displaying in separate thread!  ^^^^^^^^^
 ttlwaited=0
 frames_ttl=0
+DoFrameCalc = False
+
+def Scale_Coordinates(showPts, multiplier):
+    if multiplier==1:
+        return showPts
+    x_coords = showPts[:, 0, 0]
+    y_coords = showPts[:, 0, 1]    
+    x_coords *= 1/multiplier
+    y_coords *= 1/multiplier
+    showPts[:, 0, 0] = x_coords
+    showPts[:, 0, 1] = y_coords
+
+    return showPts
+
+def SetScaleMode():	
+	global dx, dy, da , x , y , a, X_estimate,P_estimate,prevPts,prevGray,currGray,downSample,ScaleModeRequest,downSample,Q,R,prevFrame
+	#need to change these params to keep the same processing
+	if ScaleModeRequest!= downSample :	
+		downSample=	ScaleModeRequest
+		Q = np.array([[processVar*downSample]*3])
+		R = np.array([[measVar/downSample]*3])		
+		dx = 0 ; dy = 0 ; da = 0 ; x = 0 ; y = 0 ;a = 0 				
+		X_estimate = np.zeros((1,3), dtype="float") ; P_estimate = np.ones((1,3), dtype="float") ;prevPts=None
+		prevGray=None; currGray=None ; prevFrame=None
+
 while True:	
 	#grab, frame = video.read()
 	i(f"Frame start",1)   #debug_step:1 : {time.time():.3f}
@@ -365,14 +394,16 @@ while True:
 		while not video.grab():
 			i("No frame grabbed, trying again...")
 		waited=(time.time()-startedwaiting4frame)*1000
-		if waited<0.3 and frames_ttl>50 : # if frame awaits us, we are too slow			
+		if waited<1 and frames_ttl>50 : # if frame awaits us, we are too slow			
 			ttlwaited+=1
 			if ttlwaited>2: # If we have three successive frames that we were not able to handle...
 				overloaded=True	
 				dropped_frames+=1
 				print(f"Skipped frame {waited:.1f}")
 		else:			
-			ttlwaited=0
+			#ttlwaited=0 # this way we can drop max FPS/3 frames.
+			if ttlwaited>0:
+				ttlwaited-=1
 		i(f"Grabbed ")	
 		grab, frame = video.retrieve() # Receive or discard
 			
@@ -381,6 +412,7 @@ while True:
 
 	if grab is not True:
 		exit() 
+	SetScaleMode()
 	res_w_orig = frame.shape[1]
 	res_h_orig = frame.shape[0]
 	res_w = int(res_w_orig * downSample)
@@ -391,38 +423,52 @@ while True:
 	Orig = frame
 	if downSample != 1:
 		frame = cv2.resize(frame, frameSize) # downSample if applicable
+		i(f"Scaled down")
 	currFrame = frame
-	currGray = cv2.cvtColor(currFrame, cv2.COLOR_BGR2GRAY)
-	currGray = currGray[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1]  ] #select ROI
+	
+	if enableStabization :
+		currGray = cv2.cvtColor(currFrame, cv2.COLOR_BGR2GRAY)
+		currGray = currGray[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1]  ] #select ROI
+		i(f"converted to gray")
 
 	if prevFrame is None:
 		prevOrig = frame
 		prevFrame = frame
 		prevGray = currGray
 	
-	if (grab == True) & (prevFrame is not None):
+	if (grab != True) | (prevFrame is None):
+		exit()
 
-		if  enableStabization :
-			if showrectROI == 1:
-				cv2.rectangle(prevOrig,(top_left[1],top_left[0]),(bottom_right[1],bottom_right[0]),color = (211,211,211),thickness = 1)
-			# Not in use, save for later
-			#gfftmask = np.zeros_like(currGray)
-			#gfftmask[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1]] = 255
-			i(f"converted to gray")
+	if enableStabization :
+		if showrectROI == 1:
+			cv2.rectangle(prevOrig,(top_left[1],top_left[0]),(bottom_right[1],bottom_right[0]),color = (211,211,211),thickness = 1)
+		# Not in use, save for later
+		#gfftmask = np.zeros_like(currGray)
+		#gfftmask[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1]] = 255
+		DoFrameCalc=True 
+		#DoFrameCalc= not DoFrameCalc
+		if DoFrameCalc :
 			#prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.01,minDistance=30,blockSize=3)
-			prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.01,minDistance=30,blockSize=3)
+			prevPts = cv2.goodFeaturesToTrack(prevGray,maxCorners=400,qualityLevel=0.01,minDistance=30 * downSample,blockSize=3)			
 			i(f"goodFeaturesToTrack")
 			if prevPts is not None:
-				currPts, status, err = cv2.calcOpticalFlowPyrLK(prevGray,currGray,prevPts,None,**lk_params)
+				currPts, status, err = cv2.calcOpticalFlowPyrLK(prevGray,currGray,prevPts,None,**lk_params)	
 				i(f"calcOpticalFlowPyrLK")
+				if downSample!=1:			
+					currPts=Scale_Coordinates(currPts,downSample) # NEW !!!
+					prevPts=Scale_Coordinates(prevPts,downSample) # NEW !!!
+					i(f"Points_Scaled")
+					
 				assert prevPts.shape == currPts.shape
 				idx = np.where(status == 1)[0]
 				# Add orig video resolution pts to roi pts
 				prevPts = prevPts[idx] + np.array([int(res_w_orig/roiDiv),int(res_h_orig/roiDiv)]) 
-				currPts = currPts[idx] + np.array([int(res_w_orig/roiDiv),int(res_h_orig/roiDiv)])
-				if showTrackingPoints == 1:
+				currPts = currPts[idx] + np.array([int(res_w_orig/roiDiv),int(res_h_orig/roiDiv)])				
+
+				if showTrackingPoints == 1:									
 					for pT in prevPts:
 						cv2.circle(prevOrig, (int(pT[0][0]),int(pT[0][1])) ,5,(211,211,211))
+
 				if prevPts.size & currPts.size:
 					m, inliers = cv2.estimateAffinePartial2D(prevPts, currPts)
 				if m is None:
@@ -470,100 +516,79 @@ while True:
 			m[1,1] = np.cos(da)
 			m[0,2] = dx
 			m[1,2] = dy
+			#DoFrameCalc
+
+		fS = cv2.warpAffine(prevOrig, m, (res_w_orig,res_h_orig)) # apply magic stabilizer sauce to frame
+		i(f"warpAffine passed")
+		s = fS.shape
+		T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, zoomFactor)		
+		f_stabilized = cv2.warpAffine(fS, T, (s[1], s[0]))
+
+		if cropping_percent>0:
+			f_stabilized = crop_and_overlay(f_stabilized,cropping_percent)
+
+		i(f"warpAffine2 passed")
+	else :
+		f_stabilized=Orig
+
+	window_name=f'Stabilized:{res_w_orig}x{res_h_orig}'
+	drawtext(f_stabilized, f"FPS:"+fps,240,20)
+	drawtext(f_stabilized, f"Dropped:{dropped_frames_screen}",320,20)
+	drawtext(f_stabilized, f"Load: {stab_load_screen:.0f}%",440,20)
+	
+	
+	drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else " OFF"),580,20)
+	drawtext(f_stabilized, f"Mode:"+ ("Slow" if downSample == 1 else "Fast"),690,20)
+	
+	i(f"Frame ready")
+	if SingleThread:		
+		cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)
+	
+		if maskFrame == 1:
+			mask = np.zeros(f_stabilized.shape[:2], dtype="uint8")
+			cv2.rectangle(mask, (100, 200), (1180, 620), 255, -1)
+			f_stabilized = cv2.bitwise_and(f_stabilized, f_stabilized, mask=mask)
+		if showFullScreen == 1:
+			cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
+			if process_id != None: 
+				bring_to_foreground(process_id) # Bring the window to the foreground						
 			
-			fS = cv2.warpAffine(prevOrig, m, (res_w_orig,res_h_orig)) # apply magic stabilizer sauce to frame
-			i(f"warpAffine passed")
-			s = fS.shape
-			T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, zoomFactor)		
-			f_stabilized = cv2.warpAffine(fS, T, (s[1], s[0]))
+		cv2.imshow(window_name, f_stabilized)
+		i(f"imshow completed")		
+		if showUnstabilized == 1:
+			cv2.imshow("Unstabilized ROI",prevGray)
 
-			# # Calculate dimensions for 5% margin crop
-			# margin_percent = 5
-			# margin_height = int(s[0] * (margin_percent / 100))
-			# margin_width = int(s[1] * (margin_percent / 100))
-
-			# # Calculate dimensions for the center region
-			# center_height = s[0] - 2 * margin_height
-			# center_width = s[1] - 2 * margin_width
-
-			# # Create a black background frame with the original dimensions
-			# black_frame = np.zeros((s[0], s[1], 3), dtype=np.uint8)
-
-			# # Crop the frame with a 5% margin and centered
-			# cropped_frame = f_stabilized[margin_height : margin_height + center_height,
-			# 							margin_width : margin_width + center_width]
-
-			# # Calculate the position to place the cropped frame in the center of the black frame
-			# position_y = (s[0] - center_height) // 2
-			# position_x = (s[1] - center_width) // 2
-
-			# # Overlay the cropped frame onto the black frame
-			# black_frame[position_y : position_y + center_height,
-			# 		position_x : position_x + center_width] = cropped_frame
-			# f_stabilized=black_frame
-			if cropping_percent>0:
-				f_stabilized = crop_and_overlay(f_stabilized,cropping_percent)
-
-			i(f"warpAffine2 passed")
-		else :
-			f_stabilized=Orig
-
-		window_name=f'Stabilized:{res_w}x{res_h}'
-		drawtext(f_stabilized, f"FPS:"+fps,240,20)
-		drawtext(f_stabilized, f"Dropped:{dropped_frames_screen}",320,20)
-		drawtext(f_stabilized, f"Load: {stab_load_screen:.0f}%",440,20)
 		
-		drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else " OFF"),580,20)
-		
-		i(f"Frame ready")
-		if SingleThread:		
-			cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)
-		
-			if maskFrame == 1:
-				mask = np.zeros(f_stabilized.shape[:2], dtype="uint8")
-				cv2.rectangle(mask, (100, 200), (1180, 620), 255, -1)
-				f_stabilized = cv2.bitwise_and(f_stabilized, f_stabilized, mask=mask)
-			if showFullScreen == 1:
-				cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
-				if process_id != None: 
-					bring_to_foreground(process_id) # Bring the window to the foreground						
-				
-			cv2.imshow(window_name, f_stabilized)
-			i(f"imshow completed")		
-			if showUnstabilized == 1:
-				cv2.imshow("Unstabilized ROI",prevGray)
+		#if cv2.waitKey(delay_time) & 0xFF == ord('q'):
+		if cv2.pollKey() & 0xFF == ord('q') or AbortNow:
+			break
+	else :
+		frame_queue.put(f_stabilized)
+		if not display_thread.is_alive():
+			print(f"Exiting...")
+			break
 
+	i(f"Cycle completed")
+
+	if process==None  and showFullScreen == 1:
+		# Start your process
+		if qOpenHDexecutable!="":
+			process = subprocess.Popen(qOpenHDexecutable)
+			# run qOpenHD as a local user so that config is in ~/.config/qOpenHD
+			#process = subprocess.Popen(['sudo', '-u', "home", qOpenHDexecutable])
+			#process.wait(100) # Wait for a moment to ensure the window is created
 			
-			#if cv2.waitKey(delay_time) & 0xFF == ord('q'):
-			if cv2.pollKey() & 0xFF == ord('q') or AbortNow:
-				break
-		else :
-			frame_queue.put(f_stabilized)
-			if not display_thread.is_alive():
-				print(f"Exiting...")
-				break
-
-		i(f"Cycle completed")
-
-		if process==None  and showFullScreen == 1:
-			# Start your process
-			if qOpenHDexecutable!="":
-				process = subprocess.Popen(qOpenHDexecutable)
-				# run qOpenHD as a local user so that config is in ~/.config/qOpenHD
-				#process = subprocess.Popen(['sudo', '-u', "home", qOpenHDexecutable])
-				#process.wait(100) # Wait for a moment to ensure the window is created
-				
-				time.sleep(1) 
-				process_id = process.pid # Get the process ID (PID) of the last process			
-				bring_to_foreground(process_id) # Bring the window to the foreground
-		
-		prevOrig = Orig
-		prevGray = currGray
-		prevFrame = currFrame
-		lastRigidTransform = m
-		count += 1
-	else:
-		exit()
+			time.sleep(1) 
+			process_id = process.pid # Get the process ID (PID) of the last process			
+			bring_to_foreground(process_id) # Bring the window to the foreground
+	
+	prevOrig = Orig
+	prevGray = currGray
+	prevFrame = currFrame
+	lastRigidTransform = m
+	count += 1
+	#else:
+	#	exit()
  
 video.release()
  
