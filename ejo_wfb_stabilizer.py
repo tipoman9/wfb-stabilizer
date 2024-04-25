@@ -23,6 +23,9 @@ import signal
 
 from pynput import keyboard
 
+
+OPENCV_VIDEOIO_DEBUG=1
+
 # Usage: python ejo_wfb_stabilizer.py [optional video file]
 # press "Q" to quit
 
@@ -322,16 +325,29 @@ prevFrame = None
 if len(sys.argv) == 2:
 	SRC=sys.argv[1]
 
-video = cv2.VideoCapture(SRC)
+# SRC="/home/home/Videos/8mbit.mov"
+
+video = cv2.VideoCapture(SRC) 
+
+# Check if the VideoCapture object was successfully created
+if not video.isOpened():
+ # Get extended error information
+	error_msg = video.get(cv2.CAP_PROP_POS_MSEC)
+	print(f"Error: Unable to open video source. Extended error: {error_msg}")
+	print(cv2.getBuildInformation())
+    # Handle the error or exit the program if necessary
+	exit()
 
 #MultiThread gives 30% performance increase !
 SingleThread=False
 
+frames_ttl=0
 #vvvvv  --- Displaying in separate thread! ---- vvvv
 window_name=""
 frame_queue = queue.Queue()
 def display_frames(frame_queue):
-	global window_name, process_id, AbortNow
+	global window_name, process_id, AbortNow, frames_ttl
+	
 	while True:
 		if not frame_queue.empty():
 			frame = frame_queue.get()
@@ -339,10 +355,11 @@ def display_frames(frame_queue):
 					
 			if showFullScreen == 1:
 				cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
-				if process_id != None: 
+				if process_id != None and frames_ttl%10==3 : 
 					bring_to_foreground(process_id) # Bring the window to the foreground		
 			
 			cv2.imshow(window_name, frame)
+			frames_ttl+=1
 		key = cv2.waitKey(1)
 		if (key & 0xFF == ord('q')) or AbortNow :
 			break
@@ -354,7 +371,7 @@ if not SingleThread:
 	display_thread.start()
 # ^^^^^^^^ Displaying in separate thread!  ^^^^^^^^^
 ttlwaited=0
-frames_ttl=0
+
 DoFrameCalc = False
 
 def Scale_Coordinates(showPts, multiplier):
@@ -379,7 +396,7 @@ def SetScaleMode():
 		dx = 0 ; dy = 0 ; da = 0 ; x = 0 ; y = 0 ;a = 0 				
 		X_estimate = np.zeros((1,3), dtype="float") ; P_estimate = np.ones((1,3), dtype="float") ;prevPts=None
 		prevGray=None; currGray=None ; prevFrame=None
-
+print("Waiting for video stream...")
 while True:	
 	#grab, frame = video.read()
 	i(f"Frame start",1)   #debug_step:1 : {time.time():.3f}

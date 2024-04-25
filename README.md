@@ -46,3 +46,5 @@ TAB - toggle stab mode Fast/Slow
 Space - Turn on/off stabilization
 ESC - Quit
 
+WARNING, you may need to build OpenCV with GSTREAMER support : https://docs.opencv.org/3.4/d2/de6/tutorial_py_setup_in_ubuntu.html
+
