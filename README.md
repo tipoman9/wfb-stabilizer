@@ -37,14 +37,15 @@ Added a separate thread for video processing, increased performance by 25%.
 qOpenHD will be started and brought to foreground, so that OSD is drawn.
 Overloading and video jitter  won't cause total image loss or latency , instead FPS will gradually decrease to the value the system can process.
 
-Hotkeys
+## Hotkeys
 Space or S - Switch on/off stabilized mode
 ESC or Q - exit and close qOpenHD
 
 On a i3-1215u can stabilize 1920x1080 at 50fps (40fps on Battery power), while recording h264 30fps video from the screen.
+SPACE - Turn on/off stabilization
 TAB - toggle stab mode Fast/Slow
-Space - Turn on/off stabilization
 ESC - Quit
 
 WARNING, you may need to build OpenCV with GSTREAMER support : https://docs.opencv.org/3.4/d2/de6/tutorial_py_setup_in_ubuntu.html
+
 

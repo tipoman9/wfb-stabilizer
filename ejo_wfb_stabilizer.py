@@ -24,7 +24,7 @@ import signal
 from pynput import keyboard
 
 
-OPENCV_VIDEOIO_DEBUG=1
+#OPENCV_VIDEOIO_DEBUG=1
 
 # Usage: python ejo_wfb_stabilizer.py [optional video file]
 # press "Q" to quit
@@ -85,7 +85,7 @@ maskFrame = 0
 AbortNow=False
 
 #Switch on/off
-enableStabization=True
+enableStabization=False
 
 #Max deflection of the image as a percentage of screen. Prevents screen going away when video suddenly drops. Usually between : 0.2 to 0.5
 max_windows_offset = 0.3
@@ -108,7 +108,8 @@ cropping_percent=0
 #Hardware decoding on a Intel CPU, video without audio
 #SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 #Hardware decoding on a Intel CPU, video with audio
-SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
+#SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
+SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 
 # Below is for author's Ubuntu PC with nvidia/cuda stuff running WFB-NG locally (no groundstation RPi). Requires a lot of fiddling around compiling opencv w/ cuda support
 #SRC = 'udpsrc port=5600 caps = "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96" ! rtph264depay !  h264parse ! nvh264dec ! videoconvert ! appsink sync=false'
@@ -265,7 +266,8 @@ def i(str, step=0):
 def drawtext(surface, str, x, y):
 	# Add text to the image
 	text = "Hello, OpenCV!"
-	font = cv2.FONT_HERSHEY_SIMPLEX
+#	font = cv2.FONT_HERSHEY_SIMPLEX
+	font = cv2.FONT_HERSHEY_DUPLEX
 	position = (x, y)  # (x, y) coordinates of the top-left corner of the text
 	font_scale = 0.6
 	font_color = (0, 0, 255)  # BGR color (white in this case)
