@@ -3,6 +3,7 @@ gi.require_version('Gst', '1.0')
 gi.require_version('Gtk', '3.0')
 gi.require_version('GstVideo', '1.0')
 from gi.repository import Gst, Gtk, GdkX11, GstVideo, GLib
+from pynput import keyboard
 
 class VideoPlayer:
     def __init__(self):
@@ -29,7 +30,6 @@ class VideoPlayer:
         self.video_sink = self.pipeline.get_by_name("video_sink")
 
         self.window.connect('realize', self.on_realize_cb)
-        #self.drawing_area.connect('realize', self.on_drawing_area_realize)
         self.window.connect('destroy', Gtk.main_quit)
 
         self.bus = self.pipeline.get_bus()
@@ -38,9 +38,9 @@ class VideoPlayer:
 
         self.window.show_all()
 
-    def on_realize(self, widget):
-        # Nothing needed here now
-        pass
+        # Set up the keyboard listener
+        self.listener = keyboard.Listener(on_press=self.on_key_press)
+        self.listener.start()
 
     def on_realize_cb(self, widget):
         window = widget.get_window()
@@ -52,9 +52,8 @@ class VideoPlayer:
             print("Can't create native window needed for GstVideoOverlay!")
             return
 
-        window_handle = window.get_xid()        
+        window_handle = window.get_xid()
         self.video_sink.set_window_handle(window_handle)
-        #print("on_realize completed")
 
     def on_bus_message(self, bus, message):
         if message.type == Gst.MessageType.EOS:
@@ -64,6 +63,18 @@ class VideoPlayer:
             print(f"Error received from element {message.src.get_name()}: {err.message}")
             print(f"Debugging information: {debug_info}")
             self.loop.quit()
+
+    def on_key_press(self, key):
+        try:
+            if key.char and key.char.lower() == 'q':
+                self.quit()
+        except AttributeError:
+            if key == keyboard.Key.esc:
+                self.quit()
+
+    def quit(self):
+        self.listener.stop()
+        self.loop.quit()
 
     def run(self):
         self.pipeline.set_state(Gst.State.PLAYING)
