@@ -44,7 +44,9 @@ def StartOpenHD():
 
 class VideoPlayer:
     global  SRC,StartOpenHD
+    
     def __init__(self):
+        self.window_handle=-1
         Gst.init(None)
         Gtk.init(None)
 
@@ -58,6 +60,9 @@ class VideoPlayer:
 
         self.drawing_area = Gtk.DrawingArea()
         self.window.add(self.drawing_area)
+        
+        self.window.connect('realize', self.on_realize_cb)
+        self.window.connect('destroy', Gtk.main_quit)
 
         self.create_pipeline()
         self.window.show_all()
@@ -76,17 +81,19 @@ class VideoPlayer:
             print("Can't create native window needed for GstVideoOverlay!")
             return
 
-        window_handle = window.get_xid()
-        self.video_sink.set_window_handle(window_handle)
+        self.window_handle = window.get_xid()
+        self.video_sink.set_window_handle(self.window_handle)
 
     def create_pipeline(self):
         pipeline_str = SRC
         self.pipeline = Gst.parse_launch(pipeline_str)
-        self.video_sink = self.pipeline.get_by_name("video_sink")
+        self.video_sink = self.pipeline.get_by_name("video_sink")        
 
         self.bus = self.pipeline.get_bus()
         self.bus.add_signal_watch()
         self.bus.connect('message', self.on_bus_message)
+        if self.window_handle!=-1:
+            self.video_sink.set_window_handle(self.window_handle)
         
     def on_bus_message(self, bus, message):
         print(f"Stream message: {message.type}")
