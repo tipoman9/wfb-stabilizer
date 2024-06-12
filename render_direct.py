@@ -69,7 +69,7 @@ class VideoPlayer:
 
         # Set up the keyboard listener
         self.listener = keyboard.Listener(on_press=self.on_key_press)
-        self.listener.start()
+        self.listener.start()    
 
     def on_realize_cb(self, widget):
         window = widget.get_window()
@@ -114,10 +114,12 @@ class VideoPlayer:
     def on_key_press(self, key):
         try:
             if key.char and key.char.lower() == 'q':
+                #self.restart_pipeline()
                 self.quit()
         except AttributeError:
             if key == keyboard.Key.esc:
-                self.quit()
+                self.restart_pipeline()
+                #self.quit()
 
     def restart_pipeline(self):
         self.pipeline.set_state(Gst.State.NULL)
@@ -131,12 +133,13 @@ class VideoPlayer:
 
     def run(self):
         self.pipeline.set_state(Gst.State.PLAYING)
-        while True :
-            self.loop.run()
-            print(f"Restarting Decoder")
+        #while True :
+        self.loop.run()
+        #    print(f"Restarting Decoder")
         self.pipeline.set_state(Gst.State.NULL)
 
 if __name__ == '__main__':   
-        player = VideoPlayer()    
-        player.run()
+        while True :
+            player = VideoPlayer()    
+            player.run()
     
