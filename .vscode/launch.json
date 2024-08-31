@@ -10,7 +10,11 @@
             "request": "launch",
             "sudo": true,
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "args": [                
+                "NoOSD"
+            ]       
+             
             
         }
     ]

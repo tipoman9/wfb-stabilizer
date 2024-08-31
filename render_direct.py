@@ -7,6 +7,8 @@ gi.require_version('GstVideo', '1.0')
 from gi.repository import Gst, Gtk, GdkX11, GstVideo, GLib
 from pynput import keyboard
 
+from osd_overlay import wfbOSDWindow 
+
 # for Intel HW acceleration
 SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! vaapih265dec ! videoconvert ! xvimagesink name=video_sink sync=false'
 
@@ -49,6 +51,8 @@ class VideoPlayer:
         self.window_handle=-1
         Gst.init(None)
         Gtk.init(None)
+
+        win = wfbOSDWindow()
 
         self.loop = GLib.MainLoop()
 
@@ -98,7 +102,9 @@ class VideoPlayer:
     def on_bus_message(self, bus, message):
         print(f"Stream message: {message.type}")
         if message.type == Gst.MessageType.STREAM_START:
-             StartOpenHD()            
+             #StartOpenHD()            
+             print(f"Skipping qOpenHD: {message.type}")
+
         if message.type == Gst.MessageType.EOS:
             #self.loop.quit()
             self.restart_pipeline()
@@ -142,4 +148,5 @@ if __name__ == '__main__':
         while True :
             player = VideoPlayer()    
             player.run()
+            exit()
     
