@@ -1,3 +1,4 @@
+import os
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GLib, GdkPixbuf, Pango, PangoCairo, cairo
@@ -54,7 +55,8 @@ class wfbOSDWindow(Gtk.Window):
        # self.icon_pixbuf = icon_theme.load_icon("icons\VTx.png", 32, 0)  # Load a standard icon, "gtk-open" for example
                
         try:# Load the image file as a GdkPixbuf
-            self.icon_pixbuf = GdkPixbuf.Pixbuf.new_from_file("./icons/dbm.png")
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.icon_pixbuf = GdkPixbuf.Pixbuf.new_from_file(script_dir +"/"+ "icons/dbm.png")
         except Exception as e:
             print(f"Error loading image: {e}")
             self.icon_pixbuf = None
@@ -101,7 +103,7 @@ class wfbOSDWindow(Gtk.Window):
             self.channel_stats[card_index] = {
                 "pckt_received": count_p_received,
                 "pckt_lost": curr_rx_packet_loss_perc,
-                "rssi": rx_rssi_1,
+                "rssi": abs(rx_rssi_1),
                 "link_health": 100
             }
 
@@ -184,18 +186,18 @@ class wfbOSDWindow(Gtk.Window):
                     print(f"Error unpacking payload: {e}")
 
 
-        if msg:
-            #print(msg)
-            if msg.get_type() == 'HEARTBEAT':                
-                self.start_time = None  # Clear start time when disarmed
-            elif msg.get_type() == 'SYS_STATUS':
-                self.start_time = None  # Clear start time when disarmed                 
-            elif msg.get_type() == 'RC_CHANNELS_RAW':
-                self.start_time = None  # Clear start time when disarmed
-            elif msg.get_type() == 'ATTITUDE':
-                self.roll_label.set_text(f" {msg.roll * 180 / math.pi:.1f} °")
-                self.pitch_label.set_text(f" {msg.pitch * 180 / math.pi:.1f} °")
-                #self.yaw = msg.yaw*180/math.pi
+        # if msg:
+        #     #print(msg)
+        #     if msg.get_type() == 'HEARTBEAT':                
+        #         self.start_time = None  # Clear start time when disarmed
+        #     elif msg.get_type() == 'SYS_STATUS':
+        #         self.start_time = None  # Clear start time when disarmed                 
+        #     elif msg.get_type() == 'RC_CHANNELS_RAW':
+        #         self.start_time = None  # Clear start time when disarmed
+        #     elif msg.get_type() == 'ATTITUDE':
+        #         self.roll_label.set_text(f" {msg.roll * 180 / math.pi:.1f} °")
+        #         self.pitch_label.set_text(f" {msg.pitch * 180 / math.pi:.1f} °")
+        #         #self.yaw = msg.yaw*180/math.pi
              
         
         if self.start_time is not None:
@@ -206,6 +208,34 @@ class wfbOSDWindow(Gtk.Window):
         self.queue_draw()
         # Update every 5ms
         GLib.timeout_add(10, self.update_osd)
+
+    def outlined(self, cr, text, x, y, outline_color=(0, 0, 0, 0.5), outline_width=2):
+        """
+        Draw text with an outline.
+        
+        Parameters:
+        - cr: The Cairo context.
+        - text: The text to draw.
+        - x, y: The coordinates to start drawing the text.
+        - outline_color: A tuple representing the RGBA color for the outline. Default is semi-transparent black.
+        - outline_width: The width of the outline. Default is 2.
+        """
+        # Save the current color
+        original_color = cr.get_source()
+        
+        # Draw the outline
+        cr.set_source_rgba(*outline_color)  # Set outline color
+        cr.move_to(x, y)
+        cr.text_path(text)
+        cr.set_line_width(outline_width)
+        cr.stroke_preserve()  # Stroke the outline while preserving the path
+        
+        # Restore the original color
+        cr.set_source(original_color)
+        
+        # Fill the text
+        cr.fill()
+
 
     def on_draw(self, widget, cr):
         fontsize=24
@@ -231,45 +261,49 @@ class wfbOSDWindow(Gtk.Window):
         cr.move_to(80, 20)
 
         if self.LostPckts>0:
-                cr.set_source_rgb(1, 0, 0)  # Red color
+                cr.set_source_rgb(1, 0.5, 0.5)  # Red color
         elif self.RecoveredPckts>5:
-                cr.set_source_rgb(1, 1, 0)  # Yellow color
+                cr.set_source_rgb(1, 1, 0.5)  # Yellow color
         else:
              cr.set_source_rgb(1, 1, 1)  # White color
 
-        #cr.show_text(f"{self.BitrateTotal/(1024*1024):.1f}Mb/s {self.RecoveredPckts:3}")
-        cr.show_text(f" {self.LostPckts:3} {self.RecoveredPckts:3}")
-        #layout.set_text(f"\u33C8{self.ppsTtl:4} {self.RecoveredPckts:3}", -1)
+        self.outlined(cr, f"{self.LostPckts:3} {self.RecoveredPckts:3}", 80, 20)        
 
-        cr.select_font_face("Arial", cairo.FontSlant.NORMAL, cairo.FontWeight.NORMAL) #cairo.FontSlant.ITALIC
+        cr.select_font_face("Arial", cairo.FontSlant.ITALIC, cairo.FontWeight.NORMAL) #cairo.FontSlant.ITALIC
         cr.set_source_rgb(1, 1, 1)  # White color
-        cr.set_font_size(fontsize-3)
-        cr.move_to(200, 20)        
-        cr.show_text(f"{self.BitrateTotal/(1024*1024):.1f}→{8*self.bpsTtl/(1024*1024):.1f}MB/s")
+        cr.set_font_size(fontsize-4)
+        cr.move_to(210, 20)        
+        #cr.show_text(f"{self.BitrateTotal/(1024*1024):.1f}→{8*self.bpsTtl/(1024*1024):.1f}Mb/s")
+        self.outlined(cr, f"{self.BitrateTotal/(1024*1024):.1f}→{8*self.bpsTtl/(1024*1024):.1f}Mb/s", 210, 20)
 
         row=0
-        cr.select_font_face(fontname, cairo.FontSlant.NORMAL, cairo.FontWeight.BOLD)
+        cr.select_font_face(fontname, cairo.FontSlant.NORMAL, cairo.FontWeight.NORMAL)
         cr.set_font_size(fontsize)
         for card_index, stats in self.channel_stats.items():
-            cr.set_source_rgb(0.5, 1, 0.5)  # Green color
+            cr.set_source_rgb(0.5, 1, 0.5)  # Greenish color
             cr.move_to(10,(fontsize+4)*row + 42) # {card_index}:
             if stats['pckt_lost']>30:
                 cr.set_source_rgb(1, 0, 0)  # Red color
             elif stats['pckt_lost']>2:
-                cr.set_source_rgb(1, 1, 0)  # yellow color
+                cr.set_source_rgb(1, 1, 0.5)  # yellow color
             
             if stats['pckt_lost']>250:
                 pcktlost=" ~~"
             else:
                 pcktlost=f"{stats['pckt_lost']:3}"
-            cr.show_text(f"-{stats['rssi']}㏈ {stats['pckt_received']:4}-{pcktlost}") #㏈
+
+            clr = cr.get_source()
+            #cr.show_text(f"-{stats['rssi']}㏈ {stats['pckt_received']:4}-{pcktlost}") #㏈
+            #--﹣
+            self.outlined(cr, f"{stats['rssi']}㏈ {stats['pckt_received']:4}-{pcktlost}", 10,(fontsize+2)*row + 42)
+
             row=row+1
                         
 
         gdk_cairo_surface = Gdk.cairo_surface_create_from_pixbuf(self.icon_pixbuf, 1, widget.get_window())
 
         # Draw the image at the specified coordinates
-        cr.set_source_surface(gdk_cairo_surface, 12, 6)
+        cr.set_source_surface(gdk_cairo_surface, 10, 3)
         cr.paint()
         self.set_keep_above(True)
         self.present()
