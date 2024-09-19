@@ -1,7 +1,7 @@
 # ejo_wfb_stabilizer.py
 
 
-<a href="https://youtu.be/uKa1P8-Soxw">
+<a href="https://www.youtube.com/watch?v=QLSFAsYO4MM">
     <img src="pics/stabilized.jpg" alt="Video sample" width="600"/>
 </a>  
 
