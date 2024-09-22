@@ -209,7 +209,7 @@ class wfbOSDWindow(Gtk.Window):
         # Update every 5ms
         GLib.timeout_add(10, self.update_osd)
 
-    def outlined(self, cr, text, x, y, outline_color=(0, 0, 0, 0.5), outline_width=2):
+    def outlined(self, cr, text, x, y, outline_color=(0, 0, 0, 0.9), outline_width=3):
         """
         Draw text with an outline.
         
@@ -280,22 +280,22 @@ class wfbOSDWindow(Gtk.Window):
         cr.select_font_face(fontname, cairo.FontSlant.NORMAL, cairo.FontWeight.NORMAL)
         cr.set_font_size(fontsize)
         for card_index, stats in self.channel_stats.items():
-            cr.set_source_rgb(0.5, 1, 0.5)  # Greenish color
+            cr.set_source_rgb(0.7, 1, 0.7)  # Greenish color
             cr.move_to(10,(fontsize+4)*row + 42) # {card_index}:
             if stats['pckt_lost']>30:
                 cr.set_source_rgb(1, 0, 0)  # Red color
             elif stats['pckt_lost']>2:
-                cr.set_source_rgb(1, 1, 0.5)  # yellow color
+                cr.set_source_rgb(1, 1, 0.7)  # yellow color
             
             if stats['pckt_lost']>250:
                 pcktlost=" ~~"
             else:
-                pcktlost=f"{stats['pckt_lost']:3}"
+                pcktlost=f"{-stats['pckt_lost']:>4}"
 
             clr = cr.get_source()
             #cr.show_text(f"-{stats['rssi']}㏈ {stats['pckt_received']:4}-{pcktlost}") #㏈
             #--﹣
-            self.outlined(cr, f"{stats['rssi']}㏈ {stats['pckt_received']:4}-{pcktlost}", 10,(fontsize+2)*row + 42)
+            self.outlined(cr, f"{stats['rssi']}㏈ {stats['pckt_received']:4}{pcktlost}", 10,(fontsize+2)*row + 42)
 
             row=row+1
                         
