@@ -7,10 +7,13 @@ gi.require_version('GstVideo', '1.0')
 from gi.repository import Gst, Gtk, GdkX11, GstVideo, GLib,GObject
 from gi.repository import GstRtp
 from pynput import keyboard
+import sys
 import pdb
 
 from osd_overlay import wfbOSDWindow 
 
+#this will prevent start of qOpenHD
+NoOSD = False
 # for Intel HW acceleration
 SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer name=rtpjitterbuffer0 latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! vaapih265dec ! videoconvert ! xvimagesink name=video_sink sync=false'
 
@@ -57,8 +60,9 @@ class VideoPlayer:
         self.window_handle=-1
         Gst.init(None)
         Gtk.init(None)
-
-        win = wfbOSDWindow()
+        #Start simple mavlink stats if no qOpenHD
+        if NoOSD:                
+            win = wfbOSDWindow()
 
         self.loop = GLib.MainLoop()
 
@@ -95,33 +99,23 @@ class VideoPlayer:
         self.video_sink.set_window_handle(self.window_handle)
 
     def pad_probe_callback(self, pad, info):
-        
-        #pdb.set_trace()
-         
-        #global last_seq_num
-       
         if info.type & Gst.PadProbeType.BUFFER:
             buffer = info.get_buffer()
-
             try:
-                #print("pad_probe_callback  STEP 1")        
-                # Try to map the buffer and extract the RTP sequence number
+                #print("pad_probe_callback  STEP 1")                        
                 success, rtp_buffer = GstRtp.RTPBuffer.map(buffer, Gst.MapFlags.READ)
                 if not success:
                     raise RuntimeError("Failed to map RTP buffer")
-
-                # Get the current RTP sequence number
+                
                 current_seq_num = rtp_buffer.get_seq()
                 #print(f"pad_probe_callback  STEP 2 {current_seq_num}")        
-                # Compare sequence number with the last seen sequence number
                 if self.last_seq_num is not None and current_seq_num < self.last_seq_num:
                     print(f"Out-of-order packet detected! Current sequence: {current_seq_num}, Last sequence: {self.last_seq_num}")
 
-                # Update last sequence number
+
                 self.last_seq_num = current_seq_num
 
-            except Exception as e:
-                # Handle any exceptions that occur during mapping or sequence number extraction
+            except Exception as e:                
                 print(f"Error processing RTP buffer: {str(e)}")
 
             finally:
@@ -163,8 +157,10 @@ class VideoPlayer:
     def on_bus_message(self, bus, message):
         print(f"Stream message: {message.type}")
         if message.type == Gst.MessageType.STREAM_START:
-             #StartOpenHD()            
-             print(f"Skipping qOpenHD: {message.type}")
+            if not NoOSD:
+                StartOpenHD()            
+            else:
+                print(f"Skipping qOpenHD: {message.type}")
 
         if message.type == Gst.MessageType.EOS:
             #self.loop.quit()
@@ -206,9 +202,13 @@ class VideoPlayer:
         #    print(f"Restarting Decoder")
         self.pipeline.set_state(Gst.State.NULL)
 
-if __name__ == '__main__':   
-        while True :
-            player = VideoPlayer()    
-            player.run()
-            exit()
-    
+if __name__ == '__main__':  
+        # Check if 'NoOSD' is in the command-line arguments
+    if 'NoOSD' in sys.argv:
+        NoOSD=True    
+
+    while True :
+        player = VideoPlayer()    
+        player.run()
+        exit()
+

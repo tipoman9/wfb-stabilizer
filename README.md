@@ -52,8 +52,9 @@ ESC - Quit
 
 WARNING, you may need to build OpenCV with GSTREAMER support : https://docs.opencv.org/3.4/d2/de6/tutorial_py_setup_in_ubuntu.html
 
-## no_stab
+## render_direct.py
 A simple python wrapper for gstreamer fullscreen video decoding  
+```python3 NoOSD``` 
 
 ## gs.c
 Same in C  
