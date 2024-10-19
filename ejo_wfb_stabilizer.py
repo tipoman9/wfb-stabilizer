@@ -22,6 +22,7 @@ import os
 import signal
 
 from pynput import keyboard
+from osd_overlay import wfbOSDWindow 
 
 
 #OPENCV_VIDEOIO_DEBUG=1
@@ -329,8 +330,8 @@ P_collect = []
 prevFrame = None
 
 # open local video file, warning no filetype validation 
-if len(sys.argv) == 2:
-	SRC=sys.argv[1]
+#if len(sys.argv) == 2:
+#	SRC=sys.argv[1]
 
 # SRC="/home/home/Videos/8mbit.mov"
 
@@ -344,6 +345,11 @@ if not video.isOpened():
 	print(cv2.getBuildInformation())
     # Handle the error or exit the program if necessary
 	exit()
+
+#This will show link statistics window on top
+if len(sys.argv) >= 2 and sys.argv[1].lower()=="noosd" :
+	qOpenHDexecutable="" # StopqOPenHD
+	win = wfbOSDWindow() # Show my stats window
 
 #MultiThread gives 30% performance increase !
 SingleThread=False
@@ -622,6 +628,7 @@ while True:
 			time.sleep(1) 
 			process_id = process.pid # Get the process ID (PID) of the last process			
 			bring_to_foreground(process_id) # Bring the window to the foreground
+
 	
 	if enableStabization :
 		prevOrig = Orig
