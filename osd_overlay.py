@@ -8,7 +8,8 @@ import struct
 
 class wfbOSDWindow(Gtk.Window):     
 
-    def __init__(self):
+    def __init__(self, MavlinkPort=14550):
+        self.MavlinkPort = MavlinkPort       
 
         self.channel_stats = {}
         self.bpsTtl = 0
@@ -47,7 +48,7 @@ class wfbOSDWindow(Gtk.Window):
         # Move the window to the top-left corner
         self.move(0, 0)
 
-        self.mavlink_connection = mavutil.mavlink_connection('udpin:127.0.0.1:14550')
+        self.mavlink_connection = mavutil.mavlink_connection(f'udpin:127.0.0.1:{self.MavlinkPort}')
         self.start_time = None  # Variable to hold armed time
 
        # Load an icon (you can use a file path to an image instead)

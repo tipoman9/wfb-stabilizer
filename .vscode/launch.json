@@ -12,7 +12,7 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [                
-                "NOOSD"
+                "msposd"
             ]       
              
             

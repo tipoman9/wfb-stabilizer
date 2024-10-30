@@ -23,6 +23,8 @@ import signal
 
 from pynput import keyboard
 from osd_overlay import wfbOSDWindow 
+from Xlib import display, X
+from Xlib.protocol import request
 
 
 #OPENCV_VIDEOIO_DEBUG=1
@@ -309,8 +311,30 @@ def crop_and_overlay(frame, margin_percent=5):
     return black_frame
 
 
+def get_msp_window():
+	window_id = os.environ.get('MSP_WINDOW_ID')
+	if window_id:
+		window_id = int(window_id)
+		print(f"Window ID: {window_id}")
+		return window_id
+	else:
+		print("Window ID not found in environment.")
+		return None
+
+
+def bring_window_to_front(window):    
+    d = display.Display()
+    
+    window.configure(stack_mode=X.Above)
+
+    # Set input focus to the window
+    window.set_input_focus(X.RevertToParent, X.CurrentTime)
+
+    # Flush the display to ensure the commands are applied immediately
+    d.sync()
+
 def bring_to_foreground(process_id):
-    try:
+    try:		
         subprocess.run(["wmctrl", "-ia", str(process_id)])
     except Exception as e:
         print(f"Error bringing window to foreground: {e}")
@@ -351,6 +375,22 @@ if len(sys.argv) >= 2 and sys.argv[1].lower()=="noosd" :
 	qOpenHDexecutable="" # StopqOPenHD
 	win = wfbOSDWindow() # Show my stats window
 
+if len(sys.argv) >= 2 and sys.argv[1].lower()=="msposd" :
+	#qOpenHDexecutable="/home/home/src/msposd/msposd  --master 127.0.0.1:14550 --baudrate 115200 --osd -r 50 --ahi 3 --matrix 11 -v"
+	qOpenHDexecutable=""
+
+	qOpenHDexecutable = [
+    "/home/home/src/msposd/msposd",
+    "--master", "127.0.0.1:14550",   	
+    "--osd",
+    "-r", "15",
+    "--ahi", "3",
+    "--matrix", "11"
+    #,"-v"
+]
+	
+	win = wfbOSDWindow(14551) # Show my stats window
+
 #MultiThread gives 30% performance increase !
 SingleThread=False
 #SingleThread=True
@@ -369,9 +409,12 @@ def display_frames(frame_queue):
 				cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)					
 				if showFullScreen == 1 and frames_ttl%16==0 :
 					cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
-					if process_id != None and frames_ttl%16==0 : 
-						bring_to_foreground(process_id) # Bring the window to the foreground		
-			
+				if process_id != None and frames_ttl%16==0 : 
+					bring_to_foreground(process_id) # Bring the window to the foreground	
+				# 	MSP_window = get_msp_window()
+				# 	if MSP_window: 
+				# 		bring_window_to_front(MSP_window)						
+							
 			cv2.imshow(window_name, frame)
 			frames_ttl+=1
 		
@@ -575,16 +618,17 @@ while True:
 		f_stabilized=Orig
 
 	window_name=f'Stabilized:{res_w_orig}x{res_h_orig}'
-	drawtext(f_stabilized, f"FPS:"+fps,240,20)
-	drawtext(f_stabilized, f"Dropped:{dropped_frames_screen}",320,20)
-	drawtext(f_stabilized, f"Load: {stab_load_screen:.0f}%",440,20)
+	offsetX=120
+	drawtext(f_stabilized, f"FPS:"+fps,240 + offsetX,20)
+	drawtext(f_stabilized, f"Dropped:{dropped_frames_screen}",320 + offsetX,20)
+	drawtext(f_stabilized, f"Load: {stab_load_screen:.0f}%",440 + offsetX,20)
 	
 	
-	drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else " OFF"),580,20)
-	drawtext(f_stabilized, f"Mode:"+ ("Slow" if downSample == 1 else "Fast"),690,20)
+	drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else "OFF"),560 + offsetX,20)
+	drawtext(f_stabilized, f"Mode:"+ ("Slow" if downSample == 1 else "Fast"),660 + offsetX,20)
 	frameslag=frame_queue.qsize()
 	if frameslag>0:
-		drawtext(f_stabilized, f"FramesLag:"+ f"{frameslag}",810,20)
+		drawtext(f_stabilized, f"FramesLag:"+ f"{frameslag}",770 + offsetX,20)
 	 
 	
 	i(f"Frame ready")
@@ -622,7 +666,7 @@ while True:
 		if qOpenHDexecutable!="":
 			process = subprocess.Popen(qOpenHDexecutable)
 			# run qOpenHD as a local user so that config is in ~/.config/qOpenHD
-			#process = subprocess.Popen(['sudo', '-u', "home", qOpenHDexecutable])
+			# process = subprocess.Popen(['sudo', '-u', "home", qOpenHDexecutable])
 			#process.wait(100) # Wait for a moment to ensure the window is created
 			
 			time.sleep(1) 
