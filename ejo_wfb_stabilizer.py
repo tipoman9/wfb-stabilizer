@@ -125,11 +125,19 @@ SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video
 #command_string = '/home/home/qopenhd.sh transparent'
 
 #Path to qOpenHD to start it and bring it to front to get OSD , empty if not
-qOpenHDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
+OSDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
 #qOpenHDexecutable = ""
-
 qOpenHDdir='/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/'
 
+MSPOSDexecutable = [
+    "/home/home/src/msposd/msposd",
+    "--master", "127.0.0.1:14550",   	
+    "--osd",
+    "-r", "999",
+    "--ahi", "3",
+    "--matrix", "11"
+    #,"-v"
+]	
 
 
 #Set qOpenHD params to transparent mode, no video
@@ -372,22 +380,15 @@ if not video.isOpened():
 
 #This will show link statistics window on top
 if len(sys.argv) >= 2 and sys.argv[1].lower()=="noosd" :
-	qOpenHDexecutable="" # StopqOPenHD
+	OSDexecutable="" # StopqOPenHD
 	win = wfbOSDWindow() # Show my stats window
 
 if len(sys.argv) >= 2 and sys.argv[1].lower()=="msposd" :
 	#qOpenHDexecutable="/home/home/src/msposd/msposd  --master 127.0.0.1:14550 --baudrate 115200 --osd -r 50 --ahi 3 --matrix 11 -v"
-	qOpenHDexecutable=""
+	OSDexecutable=""
 
-	qOpenHDexecutable = [
-    "/home/home/src/msposd/msposd",
-    "--master", "127.0.0.1:14550",   	
-    "--osd",
-    "-r", "15",
-    "--ahi", "3",
-    "--matrix", "11"
-    #,"-v"
-]
+	OSDexecutable = MSPOSDexecutable
+    
 	
 	win = wfbOSDWindow(14551) # Show my stats window
 
@@ -409,8 +410,8 @@ def display_frames(frame_queue):
 				cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)					
 				if showFullScreen == 1 and frames_ttl%16==0 :
 					cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
-				if process_id != None and frames_ttl%16==0 : 
-					bring_to_foreground(process_id) # Bring the window to the foreground	
+				#if process_id != None and frames_ttl%16==0 : 
+				#	bring_to_foreground(process_id) # Bring the window to the foreground	
 				# 	MSP_window = get_msp_window()
 				# 	if MSP_window: 
 				# 		bring_window_to_front(MSP_window)						
@@ -663,8 +664,8 @@ while True:
 
 	if process==None  and showFullScreen == 1:
 		# Start your process
-		if qOpenHDexecutable!="":
-			process = subprocess.Popen(qOpenHDexecutable)
+		if OSDexecutable!="":
+			process = subprocess.Popen(OSDexecutable)
 			# run qOpenHD as a local user so that config is in ~/.config/qOpenHD
 			# process = subprocess.Popen(['sudo', '-u', "home", qOpenHDexecutable])
 			#process.wait(100) # Wait for a moment to ensure the window is created

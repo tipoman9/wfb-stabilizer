@@ -12,8 +12,10 @@ import pdb
 
 from osd_overlay import wfbOSDWindow 
 
-#this will prevent start of qOpenHD
-NoOSD = False
+#show wfbstats
+wfbstats = False
+
+StartOSDApp=False
 # for Intel HW acceleration
 SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer name=rtpjitterbuffer0 latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! vaapih265dec ! videoconvert ! xvimagesink name=video_sink sync=false'
 
@@ -24,7 +26,7 @@ SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video
 #SRC = 'udpsrc port=5600 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer ! rtph265depay ! vaapih265dec ! videoconvert ! xvimagesink name=video_sink sync=false'
 
 #Path to qOpenHD to start it and bring it to front to get OSD , empty if not
-qOpenHDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
+OSDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
 #qOpenHDexecutable = ""
 qOpenHDdir='/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/'
 #Set qOpenHD params to transparent mode, no video, change as needed
@@ -33,7 +35,19 @@ sed_commands = (#set qOpenHD to h264 to free cpu
     "sed -i 's/^dev_force_show_full_screen=.*/dev_force_show_full_screen=true/' /home/home/.config/OpenHD/QOpenHD.conf &&"
     "sed -i 's/^qopenhd_primary_video_rtp_input_port=.*/qopenhd_primary_video_rtp_input_port=5599/' /home/home/.config/OpenHD/QOpenHD.conf"
 )
+
 subprocess.run(sed_commands, shell=True)
+
+MSPOSDexecutable = [
+    "/home/home/src/msposd/msposd",
+    "--master", "127.0.0.1:14550",   	
+    "--osd",
+    "-r", "999",
+    "--ahi", "3",
+    "--matrix", "11"
+    #,"-v"
+]	
+wfbstatPort=14550
 
 def bring_to_foreground(process_id):
     try:
@@ -45,12 +59,12 @@ process_id=-1
 def StartOpenHD():
     global process_id
     # Start your process, only once
-    if qOpenHDexecutable!="" and process_id==-1:
-        process = subprocess.Popen(qOpenHDexecutable)
+    if OSDexecutable!="" and process_id==-1:
+        process = subprocess.Popen(OSDexecutable)
         # run qOpenHD as a local user so that config is in ~/.config/qOpenHD                        
         time.sleep(1) 
         process_id = process.pid # Get the process ID (PID) of the last process			
-        bring_to_foreground(process_id) # Bring the window to the foreground
+        #bring_to_foreground(process_id) # Bring the window to the foreground
 
 class VideoPlayer:
     global  SRC,StartOpenHD
@@ -60,9 +74,10 @@ class VideoPlayer:
         self.window_handle=-1
         Gst.init(None)
         Gtk.init(None)
+    
         #Start simple mavlink stats if no qOpenHD
-        if NoOSD:                
-            win = wfbOSDWindow()
+        if wfbstats:                
+            win = wfbOSDWindow(wfbstatPort)
 
         self.loop = GLib.MainLoop()
 
@@ -157,8 +172,9 @@ class VideoPlayer:
     def on_bus_message(self, bus, message):
         print(f"Stream message: {message.type}")
         if message.type == Gst.MessageType.STREAM_START:
-            if not NoOSD:
-                StartOpenHD()            
+            if StartOSDApp:
+                StartOpenHD()      
+                print(f"Starting : {OSDexecutable}")      
             else:
                 print(f"Skipping qOpenHD: {message.type}")
 
@@ -204,9 +220,22 @@ class VideoPlayer:
 
 if __name__ == '__main__':  
         # Check if 'NoOSD' is in the command-line arguments
-    if 'NoOSD' in sys.argv:
-        NoOSD=True    
+    if 'qopenhd' in sys.argv:
+        StartOSDApp=True
+        wfbstats=False    
 
+    if 'msposd' in sys.argv:    
+        StartOSDApp=True
+        wfbstats=True
+        wfbstatPort=14551
+        OSDexecutable = MSPOSDexecutable
+
+    if 'wfbstats' in sys.argv: 
+        StartOSDApp=False   
+        wfbstats=True   
+        
+
+        #StartOpenHD()      
     while True :
         player = VideoPlayer()    
         player.run()
