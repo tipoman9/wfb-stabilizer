@@ -1,3 +1,6 @@
+# uses input from a patched wfb_rx over the mavlink, needs mavlink port to be duplicated
+# 
+
 import os
 import gi
 gi.require_version('Gtk', '3.0')
@@ -315,5 +318,5 @@ class wfbOSDWindow(Gtk.Window):
 
 # Initialize GTK
 if __name__ == "__main__":
-    win = wfbOSDWindow()
+    win = wfbOSDWindow(14551)
     Gtk.main()
