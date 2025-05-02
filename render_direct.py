@@ -1,6 +1,8 @@
 import gi
+import os
 import subprocess
 import time
+
 gi.require_version('Gst', '1.0')
 gi.require_version('Gtk', '3.0')
 gi.require_version('GstVideo', '1.0')
@@ -11,6 +13,7 @@ import sys
 import pdb
 
 from osd_overlay import wfbOSDWindow 
+from wfb_osd import wfb_srv_osd
 
 #show wfbstats
 wfbstats = False
@@ -42,7 +45,7 @@ MSPOSDexecutable = [
     "/home/home/src/msposd/msposd",
     "--master", "127.0.0.1:14550",   	
     "--osd",
-    "-r", "999",
+    "-r", "50",
     "--ahi", "3",
     "--matrix", "11"
     #,"-v"
@@ -75,9 +78,13 @@ class VideoPlayer:
         Gst.init(None)
         Gtk.init(None)
     
-        #Start simple mavlink stats if no qOpenHD
-        if wfbstats:                
-            win = wfbOSDWindow(wfbstatPort)
+        #Start simple mavlink stats if no qOpenHD        
+        if wfbstats:  
+            if os.path.exists('/tmp/wfb_server_started'):
+                win = wfb_srv_osd()
+            else:
+                win = wfbOSDWindow(wfbstatPort)
+            
 
         self.loop = GLib.MainLoop()
 

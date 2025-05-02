@@ -25,6 +25,8 @@ from pynput import keyboard
 from osd_overlay import wfbOSDWindow 
 from Xlib import display, X
 from Xlib.protocol import request
+from wfb_osd import wfb_srv_osd
+from gi.repository import Gtk
 
 
 #OPENCV_VIDEOIO_DEBUG=1
@@ -113,6 +115,14 @@ cropping_percent=0
 #Hardware decoding on a Intel CPU, video with audio
 #SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
+#this will drop frames when video fps is higher than supported
+SRC = (
+    'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, '
+    'clock-rate=(int)90000, encoding-name=(string)H265" ! '
+    'rtpjitterbuffer latency=50 mode=0 ! '
+    'rtph265depay ! queue ! vaapih265dec ! videoconvert ! '
+    'appsink sync=false drop=true max-buffers=1'
+)
 
 # Below is for author's Ubuntu PC with nvidia/cuda stuff running WFB-NG locally (no groundstation RPi). Requires a lot of fiddling around compiling opencv w/ cuda support
 #SRC = 'udpsrc port=5600 caps = "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96" ! rtph264depay !  h264parse ! nvh264dec ! videoconvert ! appsink sync=false'
@@ -129,11 +139,12 @@ OSDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-
 #qOpenHDexecutable = ""
 qOpenHDdir='/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/'
 
+#set lower refresh rate of msposd to free some resources for OpenCV drawing
 MSPOSDexecutable = [
     "/home/home/src/msposd/msposd",
     "--master", "127.0.0.1:14550",   	
     "--osd",
-    "-r", "999",
+    "-r", "20",
     "--ahi", "3",
     "--matrix", "11"
     #,"-v"
@@ -253,7 +264,7 @@ def i(str, step=0):
 				stab_load_screen =  round(100*(30 - perfs[2].avg*1000) /30,0) # Frame_time - free time/Frame_time
 				fps=f"{perfs[1].count}"
 				perfs = {}
-				print("Frame Queue size:" + f"{frame_queue.qsize()}")
+				#print("Frame Queue size:" + f"{frame_queue.qsize()}")
 
 
 			currentstep=1			
@@ -386,29 +397,43 @@ if len(sys.argv) >= 2 and sys.argv[1].lower()=="noosd" :
 if len(sys.argv) >= 2 and sys.argv[1].lower()=="msposd" :
 	#qOpenHDexecutable="/home/home/src/msposd/msposd  --master 127.0.0.1:14550 --baudrate 115200 --osd -r 50 --ahi 3 --matrix 11 -v"
 	OSDexecutable=""
-
-	OSDexecutable = MSPOSDexecutable
-    
+	OSDexecutable = MSPOSDexecutable    
+	  
+	if os.path.exists('/tmp/wfb_server_started'):
+		#win = wfb_srv_osd()				
+		current_dir = os.path.dirname(os.path.abspath(__file__))		
+		osd_script_path = os.path.join(current_dir, "wfb_osd.py")
+		subprocess.Popen(["python3", osd_script_path])	
+	else:
+		win = wfbOSDWindow(14551)
 	
-	win = wfbOSDWindow(14551) # Show my stats window
 
 #MultiThread gives 30% performance increase !
 SingleThread=False
 #SingleThread=True
 
 frames_ttl=0
+# Global shared frame and lock
+shared_frame = None
+frame_lock = threading.Lock()
+
 #vvvvv  =========>--- Displaying in separate thread! <===============---- vvvv
 window_name=""
-frame_queue = queue.Queue()
-def display_frames(frame_queue):
-	global window_name, process_id, AbortNow, frames_ttl
+ 
+def display_frames():
+	global shared_frame, frame_lock, window_name, process_id, AbortNow, frames_ttl
 	
-	while True:
-		if not frame_queue.empty():
-			frame = frame_queue.get()
+	while not AbortNow:
+		#if not frame_queue.empty():
+		frame = None
+		with frame_lock:
+			if shared_frame is not None:
+				frame = shared_frame.copy()
+
+		if frame is not None:			
 			if True: #frames_ttl%1==16:
 				cv2.namedWindow(window_name,cv2.WINDOW_NORMAL)					
-				if showFullScreen == 1 and frames_ttl%16==0 :
+				if showFullScreen == 1 and frames_ttl%64==0 :				
 					cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
 				#if process_id != None and frames_ttl%16==0 : 
 				#	bring_to_foreground(process_id) # Bring the window to the foreground	
@@ -425,9 +450,9 @@ def display_frames(frame_queue):
 		#if (key & 0xFF == ord('q')) or AbortNow :
 		#	break
 
-frame_queue = queue.Queue()
+
 if not SingleThread:
-	display_thread = threading.Thread(target=display_frames, args=(frame_queue,))
+	display_thread = threading.Thread(target=display_frames, daemon=True)
     
 	display_thread.start()
 # ^^^^^^^^ Displaying in separate thread!  ^^^^^^^^^
@@ -469,8 +494,12 @@ while True:
 	# this way we wont get distorted video!
 	while overloaded :
 		overloaded=False;
-		while not video.grab():
+		#while not video.grab():
+		#	i("Skip every second frame!")
+		# Even the above code will not help, OpenCV retrieving is the bottleneck, about 40fps on my system.
+		if not video.grab():			
 			i("No frame grabbed, trying again...")
+			continue			
 
 		if enableStabization:		 
 			waited=(time.time()-startedwaiting4frame)*1000
@@ -484,11 +513,11 @@ while True:
 				#ttlwaited=0 # this way we can drop max FPS/3 frames.
 				if ttlwaited>0:
 					ttlwaited-=1
-		else:
-			#This won't help, usually the system can not retrieve frames so fast.
-			if frame_queue.qsize()>1:	#if the system can't display fast enough
-				dropped_frames+=1
-				video.grab() #This will get the next frame, so max 50% skipped frames in direct mode
+		# else:
+		# 	#This won't help, usually the system can not retrieve frames so fast.
+		# 	if frame_queue.qsize()>1:	#if the system can't display fast enough
+		# 		dropped_frames+=1
+		# 		video.grab() #This will get the next frame, so max 50% skipped frames in direct mode
 			
 		i(f"Grabbed ")	
 		grab, frame = video.retrieve() # Receive or discard
@@ -499,7 +528,8 @@ while True:
 
 	if grab is not True:
 		exit() 
-	SetScaleMode()
+	if enableStabization :
+		SetScaleMode()
 	res_w_orig = frame.shape[1]
 	res_h_orig = frame.shape[0]
 	res_w = int(res_w_orig * downSample)
@@ -627,9 +657,9 @@ while True:
 	
 	drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else "OFF"),560 + offsetX,20)
 	drawtext(f_stabilized, f"Mode:"+ ("Slow" if downSample == 1 else "Fast"),660 + offsetX,20)
-	frameslag=frame_queue.qsize()
-	if frameslag>0:
-		drawtext(f_stabilized, f"FramesLag:"+ f"{frameslag}",770 + offsetX,20)
+	#frameslag=frame_queue.qsize()
+	#if frameslag>0:
+	#	drawtext(f_stabilized, f"FramesLag:"+ f"{frameslag}",770 + offsetX,20)
 	 
 	
 	i(f"Frame ready")
@@ -654,8 +684,10 @@ while True:
 		#if cv2.waitKey(delay_time) & 0xFF == ord('q'):
 		if count%2==1 and cv2.pollKey() & 0xFF == ord('q') or AbortNow:
 			break
-	else :
-		frame_queue.put(f_stabilized)
+	else :		 
+		# Update shared frame with lock
+		with frame_lock:
+			shared_frame = f_stabilized
 		if not display_thread.is_alive():
 			print(f"Exiting...")
 			break

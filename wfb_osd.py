@@ -2,6 +2,9 @@
 # 
 
 import os
+import signal
+import sys
+import time
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GLib, GdkPixbuf, Pango, PangoCairo, cairo
@@ -19,7 +22,7 @@ HOST = '127.0.0.1'
 #PORT = 8103
 HISTORY_LEN = 10
 
-class wfbOSDWindow(Gtk.Window):   
+class wfb_srv_osd(Gtk.Window):   
     # History storage
     antenna_history = defaultdict(lambda: {
         'pkt_recv': deque(maxlen=HISTORY_LEN),
@@ -118,7 +121,7 @@ class wfbOSDWindow(Gtk.Window):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         
         # Set up the transparent window
-        self.set_title("Mavlink Overlay")
+        self.set_title("wfb-ng stats")
         self.set_default_size(380, 260)
         self.set_app_paintable(True)
         self.set_decorated(False)
@@ -159,6 +162,19 @@ class wfbOSDWindow(Gtk.Window):
 
         # Show the window
         self.show_all()
+        self.start_gtk_thread()
+
+    def start_gtk_thread(self):
+        """Start Gtk.main() in a background thread if not already running."""
+        if not getattr(self.__class__, "_gtk_thread_started", False):
+            def run_gtk():
+                try:
+                    Gtk.main()
+                except Exception as e:
+                    print(f"GTK main loop error: {e}")
+
+            threading.Thread(target=run_gtk, daemon=True).start()
+            self.__class__._gtk_thread_started = True        
 
     def outlined(self, cr, text, x, y, outline_color=(0, 0, 0, 0.9), outline_width=3):
         """
@@ -311,7 +327,40 @@ class wfbOSDWindow(Gtk.Window):
         return max_output * (1 - math.exp(-val / steepness))
 
 
+PID_FILE = "/tmp/wfb_osd.pid"
+
+def ensure_single_instance():
+    # Check if PID file exists
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+
+            # Check if process is running
+            os.kill(old_pid, 0)  # Does not kill, just checks
+            print(f"🔄 Found existing OSD process (PID {old_pid}), killing...")
+            os.kill(old_pid, signal.SIGTERM)
+            time.sleep(1)  # Give time to shut down
+        except ProcessLookupError:
+            print("ℹ️ Stale PID file, no running process.")
+        except Exception as e:
+            print(f"⚠️ Error checking/killing old process: {e}")
+
+    # Write new PID
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+    # Cleanup PID file on exit
+    def remove_pid_file(*args):
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, remove_pid_file)
+    signal.signal(signal.SIGTERM, remove_pid_file)
+
 # Initialize GTK
 if __name__ == "__main__":
-    win = wfbOSDWindow()
+    #ensure_single_instance()
+    win = wfb_srv_osd()
     Gtk.main()
