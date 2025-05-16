@@ -428,7 +428,7 @@ def display_frames():
 		frame = None
 		with frame_lock:
 			if shared_frame is not None:
-				frame = shared_frame.copy()
+				frame = shared_frame #.copy() # no need to copy !		
 
 		if frame is not None:			
 			if True: #frames_ttl%1==16:
