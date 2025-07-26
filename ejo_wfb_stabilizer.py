@@ -114,14 +114,14 @@ cropping_percent=0
 #SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 #Hardware decoding on a Intel CPU, video with audio
 #SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
-SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
+#SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 #this will drop frames when video fps is higher than supported
 SRC = (
-    'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, '
-    'clock-rate=(int)90000, encoding-name=(string)H265" ! '
-    'rtpjitterbuffer latency=50 mode=0 ! '
-    'rtph265depay ! queue ! vaapih265dec ! videoconvert ! '
-    'appsink sync=false drop=true max-buffers=1'
+     'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, '
+     'clock-rate=(int)90000, encoding-name=(string)H265" ! '
+     'rtpjitterbuffer latency=50 mode=0 ! '
+     'rtph265depay ! queue ! vaapih265dec ! videoconvert ! '
+     'appsink sync=false drop=true max-buffers=1'
 )
 
 # Below is for author's Ubuntu PC with nvidia/cuda stuff running WFB-NG locally (no groundstation RPi). Requires a lot of fiddling around compiling opencv w/ cuda support
@@ -236,6 +236,11 @@ class PerfCounter:
 			
 perfs = {}
 
+#May improve performance
+#print(cv2.ocl.haveOpenCL())
+#print(cv2.ocl.useOpenCL())
+#cv2.ocl.setUseOpenCL(False)
+
 lastticks=time.time()
 dropped_frames=0
 dropped_frames_screen=0
@@ -244,12 +249,14 @@ currentstep=0
 fps=""
 procstart=time.time()
 stab_load_screen=0
+stab_load_screen2=0
 
 
 #display debug info in console
 def i(str, step=0):
-	global lastticks,currentstep,procstart, perfs, dropped_frames_screen, dropped_frames,stab_load_screen, fps
+	global lastticks,currentstep,procstart, perfs, dropped_frames_screen, dropped_frames,stab_load_screen,stab_load_screen2, fps,DisplayFPS
 	suffix=""
+	TimeTTL=0
 	if showdebug==1 :
 		if step==1 :
 			if step in perfs and (time.time()-perfs[step].created)>1:
@@ -257,12 +264,26 @@ def i(str, step=0):
 				for index, (key, value) in enumerate(perfs.items()):
 					#print(f"Counter {index + 1}: {key}")
 					print(f"{key}"+ " : " + value.name[:20].ljust(20) + " min:" + f"{value.min*1000:.1f}" 
-					+ " max:" + f"{value.max*1000:.1f}".ljust(6) + " avg:" + f"{value.avg*1000:.1f}".ljust(6)) 
+					+ " max:" + f"{value.max*1000:.1f}".ljust(6) + " avg:" + f"{value.avg*1000:.1f}".ljust(6))
+					if key>2: # steps after 2 are frame processing
+						TimeTTL+= value.avg*1000	 
 				 
+				print("Image processing TTL(ms):"f"{TimeTTL:.1f}".ljust(6))
+				print(f"FPS:{perfs[1].count:.1f}|{DisplayFPS:.1f}")
+				
 				dropped_frames_screen=	dropped_frames
-				dropped_frames=0
-				stab_load_screen =  round(100*(30 - perfs[2].avg*1000) /30,0) # Frame_time - free time/Frame_time
-				fps=f"{perfs[1].count}"
+				dropped_frames=0				
+				#2 is the time we waited for a frame, lower means CPU is not able to process rendering				
+				#fps=f"{perfs[1].count}|{DisplayFPS:.0f}"
+				fps=f"{DisplayFPS:.0f}"
+				if perfs[1].count - DisplayFPS > 0 :
+					dropped_frames_screen = dropped_frames_screen + (perfs[1].count - DisplayFPS)
+				DisplayFPS=0
+				fps_count=perfs[1].count				
+				stab_load_screen =  round(100*(fps_count - perfs[2].avg*1000) /fps_count,0) # Frame_time - free time/Frame_time
+				stab_load_screen2 = 100 * TimeTTL / (1000/(fps_count+1));
+				if stab_load_screen2>100:
+					stab_load_screen2=99;
 				perfs = {}
 				#print("Frame Queue size:" + f"{frame_queue.qsize()}")
 
@@ -288,14 +309,14 @@ def i(str, step=0):
 		#print(f"{currentstep} : {str[:20].ljust(20)} = {elapsed * 1000:.1f}" + suffix)
 
 #Draw simple text over image
-def drawtext(surface, str, x, y):
+def drawtext(surface, str, x, y, font_color = (0, 0, 127),font_scale = 0.6):
 	# Add text to the image
 	text = "Hello, OpenCV!"
 #	font = cv2.FONT_HERSHEY_SIMPLEX
 	font = cv2.FONT_HERSHEY_DUPLEX
 	position = (x, y)  # (x, y) coordinates of the top-left corner of the text
-	font_scale = 0.6
-	font_color = (0, 0, 255)  # BGR color (white in this case)
+	#font_scale = 0.6
+	#font_color = (0, 64, 255)  # BGR color (white in this case)
 	thickness = 1
 
 	cv2.putText(surface, str, position, font, font_scale, font_color, thickness)
@@ -413,6 +434,7 @@ SingleThread=False
 #SingleThread=True
 
 frames_ttl=0
+DisplayFPS=0
 # Global shared frame and lock
 shared_frame = None
 frame_lock = threading.Lock()
@@ -420,15 +442,21 @@ frame_lock = threading.Lock()
 #vvvvv  =========>--- Displaying in separate thread! <===============---- vvvv
 window_name=""
  
+
+frame_ready = threading.Event() 
 def display_frames():
-	global shared_frame, frame_lock, window_name, process_id, AbortNow, frames_ttl
+	global shared_frame, frame_lock, window_name, process_id, AbortNow, frames_ttl, DisplayFPS
 	
 	while not AbortNow:
 		#if not frame_queue.empty():
+		frame_ready.wait() # this may skip frames if processing is faster than dispalying
+		frame_ready.clear()
+    	
 		frame = None
 		with frame_lock:
 			if shared_frame is not None:
-				frame = shared_frame #.copy() # no need to copy !		
+				frame = shared_frame  #.copy()  # no need to copy??!! 
+				#No one will mess with this frame when it is ready, the new frame will be copied over it only after warpAffine2, which is the last step of frame stabilization
 
 		if frame is not None:			
 			if True: #frames_ttl%1==16:
@@ -442,7 +470,7 @@ def display_frames():
 				# 		bring_window_to_front(MSP_window)						
 							
 			cv2.imshow(window_name, frame)
-			frames_ttl+=1
+			DisplayFPS+=1
 		
 		if cv2.pollKey() & 0xFF == ord('q') or AbortNow:
 			break	 
@@ -519,7 +547,7 @@ while True:
 		# 		dropped_frames+=1
 		# 		video.grab() #This will get the next frame, so max 50% skipped frames in direct mode
 			
-		i(f"Grabbed ")	
+		i(f"Grabbed")	
 		grab, frame = video.retrieve() # Receive or discard
 
 			
@@ -647,19 +675,21 @@ while True:
 		i(f"warpAffine2 passed")
 	else :
 		f_stabilized=Orig
-
+	PosY=16;
 	window_name=f'Stabilized:{res_w_orig}x{res_h_orig}'
 	offsetX=120
-	drawtext(f_stabilized, f"FPS:"+fps,240 + offsetX,20)
-	drawtext(f_stabilized, f"Dropped:{dropped_frames_screen}",320 + offsetX,20)
-	drawtext(f_stabilized, f"Load: {stab_load_screen:.0f}%",440 + offsetX,20)
+	drawtext(f_stabilized, f"FPS:"+fps,220 + offsetX,PosY)
+	if dropped_frames_screen>0:
+		drawtext(f_stabilized, f"({dropped_frames_screen})",286 + offsetX,PosY,(0, 32, 255))
+	drawtext(f_stabilized, f"@{stab_load_screen:.0f}%",330 + offsetX,PosY) #f"@{stab_load_screen:.0f}/{stab_load_screen2:.0f}%"
 	
 	
-	drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else "OFF"),560 + offsetX,20)
-	drawtext(f_stabilized, f"Mode:"+ ("Slow" if downSample == 1 else "Fast"),660 + offsetX,20)
+	drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else "OFF"),400 + offsetX,PosY, (0, 32, 255) if enableStabization == True else (0, 128, 192))
+	if enableStabization == True:
+		drawtext(f_stabilized, f":"+ ("Slow" if downSample == 1 else "Fast"),480 + offsetX,PosY)
 	#frameslag=frame_queue.qsize()
 	#if frameslag>0:
-	#	drawtext(f_stabilized, f"FramesLag:"+ f"{frameslag}",770 + offsetX,20)
+	#	drawtext(f_stabilized, f"FramesLag:"+ f"{frameslag}",770 + offsetX,PosY)
 	 
 	
 	i(f"Frame ready")
@@ -688,6 +718,7 @@ while True:
 		# Update shared frame with lock
 		with frame_lock:
 			shared_frame = f_stabilized
+		frame_ready.set()  # Signal display thread
 		if not display_thread.is_alive():
 			print(f"Exiting...")
 			break
@@ -709,8 +740,11 @@ while True:
 	
 	if enableStabization :
 		prevOrig = Orig
-		prevGray = currGray
-		prevFrame = currFrame		
+		try:
+			prevGray = currGray
+			prevFrame = currFrame		
+		except Exception as e:
+			print(f"An error occurred: {e}")
 		lastRigidTransform = m
 
 	count += 1

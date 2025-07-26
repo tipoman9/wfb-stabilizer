@@ -7,7 +7,7 @@ shared_frame = None
 frame_lock = threading.Lock()
 AbortNow = False
 window_name = "Low-Latency Stream"
-showFullScreen = 1
+showFullScreen = 0
 frames_ttl = 0
 
 # === Display Thread ===
@@ -77,10 +77,10 @@ def main():
         ret, frame = cap.retrieve()
         if not ret or frame is None:
             continue
-
+        #time.sleep(0.05)
         # Optional: process frame
         f_stabilized = frame  # Replace with your actual processing if needed
-
+        
         # Thread-safe shared frame update
         with frame_lock:
             shared_frame = f_stabilized
