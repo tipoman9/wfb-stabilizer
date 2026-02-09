@@ -1,4 +1,5 @@
-# uses input from a patched wfb_rx over the mavlink, needs mavlink port to be duplicated
+# uses input from a patched wfb_rx over mavlink, needs mavlink port to be duplicated.
+# needs wfb_rx started separately not via wfb-ng server
 # 
 
 import os

@@ -1,4 +1,4 @@
-# uses input from a patched wfb_rx over the mavlink, needs mavlink port to be duplicated
+# connectes to wfb-ng server
 # 
 
 import os
@@ -34,77 +34,85 @@ class wfb_srv_osd(Gtk.Window):
   
 
     def connect_and_track(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            print(f"Connecting to {HOST}:{self.wfb_port}...")
-            sock.connect((HOST, self.wfb_port))
-            sock_file = sock.makefile('r')
+        RECONNECT_DELAY = 3  # seconds between reconnection attempts
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    print(f"Connecting to {HOST}:{self.wfb_port}...")
+                    sock.connect((HOST, self.wfb_port))
+                    sock_file = sock.makefile('r')
 
-            print("Connected. Listening for JSON data...\n")
-            for line in sock_file:
-                line = line.strip()
-                if not line:
-                    continue
+                    print("Connected. Listening for JSON data...\n")
+                    for line in sock_file:
+                        line = line.strip()
+                        if not line:
+                            continue
 
-                try:
-                    data = json.loads(line)
+                        try:
+                            data = json.loads(line)
 
-                    # Process packet stats
-                    packets = data.get('packets', {})
-                    self.wfb_stat_id=data.get('id')
-                    if self.wfb_stat_id!="video rx":
-                        continue
+                            # Process packet stats
+                            packets = data.get('packets', {})
+                            self.wfb_stat_id=data.get('id')
+                            if self.wfb_stat_id!="video rx":
+                                continue
 
-                    for key in ['all','all_bytes', 'dec_err', 'dec_ok','uniq', 'fec_rec', 'lost','out_bytes']:
-                        if key in packets:
-                            value = packets[key][0] if isinstance(packets[key], list) else packets[key]
-                            self.packet_history[key].append(value)
-                    
-                    print("--- Packet History (last 10) ---")
-                    for key in ['all','uniq', 'dec_err', 'dec_ok', 'fec_rec', 'lost']:
-                        print(f"{key}: {list(self.packet_history[key])}")
+                            for key in ['all','all_bytes', 'dec_err', 'dec_ok','uniq', 'fec_rec', 'lost','out_bytes']:
+                                if key in packets:
+                                    value = packets[key][0] if isinstance(packets[key], list) else packets[key]
+                                    self.packet_history[key].append(value)
+                            
+                            print("--- Packet History (last 10) ---")
+                            for key in ['all','uniq', 'dec_err', 'dec_ok', 'fec_rec', 'lost']:
+                                print(f"{key}: {list(self.packet_history[key])}")
 
-                    self.out_bytes = self.packet_history["out_bytes"][-1] if self.packet_history["out_bytes"] else None
-                    self.uniq = self.packet_history["uniq"][-1] if self.packet_history["all"] else None
-                    self.bad = self.packet_history["bad"][-1] if self.packet_history["bad"] else None
- 
-                    self.all_bytes = self.packet_history["all_bytes"][-1] if self.packet_history["all_bytes"] else None
-                    self.lost = self.packet_history["lost"][-1] if self.packet_history["lost"] else None
-                    self.fec_rec =  self.packet_history["fec_rec"][-1] if self.packet_history["fec_rec"] else None
-                    self.RecoveredFrags =  0
+                            self.out_bytes = self.packet_history["out_bytes"][-1] if self.packet_history["out_bytes"] else None
+                            self.uniq = self.packet_history["uniq"][-1] if self.packet_history["all"] else None
+                            self.bad = self.packet_history["bad"][-1] if self.packet_history["bad"] else None
+        
+                            self.all_bytes = self.packet_history["all_bytes"][-1] if self.packet_history["all_bytes"] else None
+                            self.lost = self.packet_history["lost"][-1] if self.packet_history["lost"] else None
+                            self.fec_rec =  self.packet_history["fec_rec"][-1] if self.packet_history["fec_rec"] else None
+                            self.RecoveredFrags =  0
 
-                    for ant_id, stats in self.channel_stats.items():                        
-                        stats["pkt_recv"] = 0
+                            for ant_id, stats in self.channel_stats.items():                        
+                                stats["pkt_recv"] = 0
 
-                    # Process antenna stats
-                    for ant in data.get('rx_ant_stats', []):
-                        ant_id = ant['ant']
-                        
-                        pkt_lost = (self.uniq - ant['pkt_recv']) + self.lost + self.fec_rec
-                         
-                        self.antenna_history[ant_id]['pkt_recv'].append(ant['pkt_recv'])
-                        self.antenna_history[ant_id]['pkt_lost'].append(pkt_lost)
-                        self.antenna_history[ant_id]['rssi_avg'].append(ant['rssi_avg'])
-                        
-                        self.channel_stats[ant_id] = {
-                            "pkt_recv": ant['pkt_recv'],
-                            "pkt_lost": pkt_lost,
-                            "rssi_avg": abs(ant['rssi_avg']),
-                            "link_health": 100
-                        }
+                            # Process antenna stats
+                            for ant in data.get('rx_ant_stats', []):
+                                ant_id = ant['ant']
+                                
+                                pkt_lost = (self.uniq - ant['pkt_recv']) + self.lost + self.fec_rec
+                                
+                                self.antenna_history[ant_id]['pkt_recv'].append(ant['pkt_recv'])
+                                self.antenna_history[ant_id]['pkt_lost'].append(pkt_lost)
+                                self.antenna_history[ant_id]['rssi_avg'].append(ant['rssi_avg'])
+                                
+                                self.channel_stats[ant_id] = {
+                                    "pkt_recv": ant['pkt_recv'],
+                                    "pkt_lost": pkt_lost,
+                                    "rssi_avg": abs(ant['rssi_avg']),
+                                    "link_health": 100,
+                                    "snr_avg" : ant['snr_avg']
+                                }
 
-                    # Force the window to redraw
-                    self.queue_draw()
-                     # Optional: print latest state for debugging
-                    print("--- Antenna History (last 10) ---")
-                    for ant_id, stats in self.antenna_history.items():
-                        print(f"Antenna {ant_id}: pkt_recv={list(stats['pkt_recv'])}, rssi_avg={list(stats['rssi_avg'])}")
+                            # Force the window to redraw
+                            self.queue_draw()
+                            # Optional: print latest state for debugging
+                            print("--- Antenna History (last 10) ---")
+                            for ant_id, stats in self.antenna_history.items():
+                                print(f"Antenna {ant_id}: pkt_recv={list(stats['pkt_recv'])}, rssi_avg={list(stats['rssi_avg'])}")
 
-                    print()
+                            print()
 
-                except json.JSONDecodeError as e:
-                    print(f"Invalid JSON: {e}")
-                except Exception as e:
-                    print(f"Error: {e}")
+                        except json.JSONDecodeError as e:
+                            print(f"Invalid JSON: {e}")
+                        except Exception as e:
+                            print(f"Error: {e}")
+            except Exception as e:
+                print(f"Socket error or connection failed: {e}")
+            print(f"Disconnected from {HOST}:{self.wfb_port}. Will retry in {RECONNECT_DELAY} seconds...\n")
+            time.sleep(RECONNECT_DELAY)
 
     def __init__(self, WFP_Port=8103):
         self.wfb_port = WFP_Port       

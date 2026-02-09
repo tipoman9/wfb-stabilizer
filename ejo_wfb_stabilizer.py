@@ -309,17 +309,27 @@ def i(str, step=0):
 		#print(f"{currentstep} : {str[:20].ljust(20)} = {elapsed * 1000:.1f}" + suffix)
 
 #Draw simple text over image
-def drawtext(surface, str, x, y, font_color = (0, 0, 127),font_scale = 0.6):
-	# Add text to the image
-	text = "Hello, OpenCV!"
-#	font = cv2.FONT_HERSHEY_SIMPLEX
+def drawtextSimple(surface, str, x, y, font_color = (0, 0, 127),font_scale = 0.6):	
 	font = cv2.FONT_HERSHEY_DUPLEX
-	position = (x, y)  # (x, y) coordinates of the top-left corner of the text
-	#font_scale = 0.6
+	position = (x, y)  # coordinates of the top-left corner of the text	
 	#font_color = (0, 64, 255)  # BGR color (white in this case)
 	thickness = 1
 
 	cv2.putText(surface, str, position, font, font_scale, font_color, thickness)
+
+def drawtext(surface, str, x, y, font_color=(0, 222, 64), font_scale=0.6, outline_color=(0, 0, 0), outline_thickness=2):
+	#font = cv2.FONT_HERSHEY_DUPLEX
+	#font = cv2.FONT_HERSHEY_SIMPLEX
+	font = cv2.FONT_HERSHEY_PLAIN
+	position = (x, y)
+	thickness = 1
+	font_scale = 1.2
+	# Draw outline (thicker, in outline_color)
+	#cv2.putText(surface, str, position, font, font_scale, outline_color, outline_thickness , cv2.LINE_AA)
+	cv2.putText(surface, str, position, font, font_scale, outline_color, outline_thickness, cv2.LINE_AA)
+	# Draw main text (normal thickness)
+	cv2.putText(surface, str, position, font, font_scale, font_color, thickness, cv2.LINE_AA)
+
 
 # A basic attempt to do cropping, may slow down, needs optimization
 def crop_and_overlay(frame, margin_percent=5):
