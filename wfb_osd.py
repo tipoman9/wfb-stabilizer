@@ -27,7 +27,8 @@ class wfb_srv_osd(Gtk.Window):
     antenna_history = defaultdict(lambda: {
         'pkt_recv': deque(maxlen=HISTORY_LEN),
         'pkt_lost': deque(maxlen=HISTORY_LEN),
-        'rssi_avg': deque(maxlen=HISTORY_LEN)
+        'rssi_avg': deque(maxlen=HISTORY_LEN),
+        'snr_avg': deque(maxlen=HISTORY_LEN)
     })
 
     packet_history = defaultdict(lambda: deque(maxlen=HISTORY_LEN))  # for all, dec_err, etc.
@@ -87,13 +88,14 @@ class wfb_srv_osd(Gtk.Window):
                                 self.antenna_history[ant_id]['pkt_recv'].append(ant['pkt_recv'])
                                 self.antenna_history[ant_id]['pkt_lost'].append(pkt_lost)
                                 self.antenna_history[ant_id]['rssi_avg'].append(ant['rssi_avg'])
+                                self.antenna_history[ant_id]['snr_avg'].append(ant.get('snr_avg', ''))
                                 
                                 self.channel_stats[ant_id] = {
                                     "pkt_recv": ant['pkt_recv'],
                                     "pkt_lost": pkt_lost,
                                     "rssi_avg": abs(ant['rssi_avg']),
                                     "link_health": 100,
-                                    "snr_avg" : ant['snr_avg']
+                                    "snr_avg" :  ant.get('snr_avg', '') 
                                 }
 
                             # Force the window to redraw
@@ -208,7 +210,7 @@ class wfb_srv_osd(Gtk.Window):
         
         cr.fill()
 
-
+    pair_mode=0 
     def on_draw(self, widget, cr):
         fontsize=20
         # Clear the background with full transparency
@@ -237,7 +239,7 @@ class wfb_srv_osd(Gtk.Window):
         else:
              cr.set_source_rgb(1, 1, 1)  # White color
 
-        self.outlined(cr, f"{self.uniq} {self.lost:2} {self.fec_rec:2}", 46, 20)        
+        self.outlined(cr, f"{self.uniq} {self.lost:2} {self.fec_rec:2}", 44, 20)        
 
         cr.select_font_face("Arial", cairo.FontSlant.ITALIC, cairo.FontWeight.NORMAL) #cairo.FontSlant.ITALIC
         cr.set_source_rgb(1, 1, 1)  # White color
@@ -249,7 +251,11 @@ class wfb_srv_osd(Gtk.Window):
         row=0
         cr.select_font_face(fontname, cairo.FontSlant.NORMAL, cairo.FontWeight.NORMAL)
         cr.set_font_size(fontsize)
-        for card_index, stats in self.channel_stats.items():            
+        draw_separator = False
+        skip_chart = False
+
+        for card_index, stats in sorted(self.channel_stats.items()): 
+        #for idx, (card_index, stats) in enumerate(channel_items):           
 
             cr.set_source_rgb(0.7, 1, 0.7)  # Greenish color
             cr.move_to(10,(fontsize+4)*row + 42) # {card_index}:
@@ -267,57 +273,124 @@ class wfb_srv_osd(Gtk.Window):
                 pcktlost="~~~~"
                 stats['rssi_avg']="??"
 
-            clr = cr.get_source()                        
-            self.outlined(cr, f"{stats['rssi_avg']} {pcktlost}", 10,(fontsize+2)*row + 46)
+            clr = cr.get_source()
+            rowx=10
+            
+            #rowy=(fontsize+2)*row + 46                  
+            rowy = (fontsize + 2) * row + 46 + (self.pair_mode * row // 2) * 4
+
+            # RSSI x            
+            self.outlined(cr, f"{stats['rssi_avg']} ", rowx, rowy)
+            rowx += cr.text_extents(f"{stats['rssi_avg']} ").x_advance
+            # SNR (different color) Show it if there is info
+            snr_avg_ttl = sum(self.antenna_history[card_index]['snr_avg'])
+            if snr_avg_ttl>0:
+                cr.set_font_size(fontsize)    
+                cr.select_font_face("Courier", cairo.FontSlant.NORMAL, cairo.FontWeight.BOLD)        
+                snr = stats.get('snr_avg')
+
+                cr.set_source_rgb(1, 1, 1)
+                if snr is None: 
+                    cr.set_source_rgb(1, 1, 1)          # default / unknown
+                elif snr < 12:
+                    cr.set_source_rgb(1, 0, 0)          # red
+                elif snr < 20:
+                    cr.set_source_rgb(1, 1, 0)          # yellow
+                            
+                self.outlined(cr,  f"{stats.get('snr_avg', '')}", rowx, rowy-1, (0, 0, 0, 0.9),  2)
+                rowx += cr.text_extents(f"{stats.get('snr_avg', '')}").x_advance
+                cr.select_font_face(fontname, cairo.FontSlant.NORMAL, cairo.FontWeight.NORMAL)
+                cr.set_font_size(fontsize)            
+            # pkt lost
+            if not skip_chart:
+                cr.set_source_rgb(1, 1, 1)
+                self.outlined(cr, f"{pcktlost}", rowx, rowy)
            
             # =============================================================================================
             # ================ Mini Line Chart (updated per antenna iteration) ============================
 
-            chart_x = 110
-            chart_y = (fontsize + 0) * row + 32
-            chart_height = fontsize - 4
-            point_width = 6
+            if skip_chart:
+                skip_chart = False
+            else:
+                chart_x = 110
+                #chart_y = (fontsize + 2) * row + 28
+                chart_y = (fontsize + 2) * row + 28 + (self.pair_mode * row // 2) * 4 #add space after pair
+                chart_height = fontsize - 4
+                point_width = 6
 
+                
+                pkt_recv_history = self.antenna_history[card_index]['pkt_lost']                
 
-            pkt_recv_history = self.antenna_history[card_index]['pkt_lost']
-            #pckt_lost_values = [min(v, chart_height) for v in list(pkt_recv_history)]
-            pckt_lost_values = [self.exp_scale(v, 50, chart_height-2,15) for v in list(pkt_recv_history)]
-            if stats['pkt_recv']==0:
-                pckt_lost_values = [chart_height-2 for v in list(pkt_recv_history)]
-            
-            while len(pckt_lost_values) < 10:
-                pckt_lost_values.insert(0, 0)
-            
-            for i in range(len(pckt_lost_values) - 1):
-                x1 = chart_x + i * point_width
-                y1 = chart_y + chart_height - pckt_lost_values[i]
-                x2 = chart_x + (i + 1) * point_width
-                y2 = chart_y + chart_height - pckt_lost_values[i + 1]
+                # check if next antenna has identical history to pair it visually   
+                # we need to guess that antennas with same received packet stats are actually one receiver with two antennas            
+                keys = sorted(list(self.channel_stats.keys()))
+                idx = keys.index(card_index)
+                if idx + 1 < len(keys):
+                    next_key = keys[idx + 1]
+                    next_hist = self.antenna_history[next_key]['pkt_recv']
+                    snr_avg_ttl = sum(self.antenna_history[next_key]['snr_avg'])
+                    
+                    if len(pkt_recv_history) >= 10 and len(next_hist) >= 10 and snr_avg_ttl>100 :                        
+                        if list(self.antenna_history[card_index]['pkt_recv'])[-10:] == list(next_hist)[-10:] and sum(next_hist) > 100:                           
+                            self.pair_mode=1 
+                            chart_height *= 1
+                            chart_x -=30
+                            #draw the chart for the next row                         
+                            chart_y = (fontsize + 2) * (row+1) + 28 + (self.pair_mode * (row+1) // 2) * 4
+                            skip_chart = True
+                            cr.set_source_rgba(0, 0, 0, 0.3)   # semi-transparent black line to distinguish pairs
+                            cr.set_line_width(2*2)
+                            cr.move_to(10, chart_y + chart_height + 8)                
+                            cr.line_to(chart_x + len(pkt_recv_history) * point_width - 2, chart_y + chart_height + 8)
+                            cr.stroke()
+                            
 
-                # 1. Black outline (thicker, behind the color)
-                cr.set_source_rgb(0, 0, 0)
-                cr.set_line_width(5)
-                cr.move_to(x1, y1)
-                cr.line_to(x2, y2)
-                cr.stroke()
+                #pckt_lost_values = [min(v, chart_height) for v in list(pkt_recv_history)]
+                pckt_lost_values = [self.exp_scale(v, 50, chart_height-2,15) for v in list(pkt_recv_history)]
+                if stats['pkt_recv']==0:
+                    pckt_lost_values = [chart_height-2 for v in list(pkt_recv_history)]
 
-                # 2. Colored foreground based on average value of the segment
-                avg_val = (pckt_lost_values[i] + pckt_lost_values[i + 1]) / 2
-                if avg_val < 3:
-                    cr.set_source_rgb(0.0, 1.0, 0.0)  # Green
-                elif avg_val <= chart_height-2 -1:
-                    cr.set_source_rgb(1.0, 1.0, 0.0)  # Yellow
-                else:
-                    cr.set_source_rgb(1.0, 0.0, 0.0)  # Red
+                while len(pckt_lost_values) < 10:
+                    pckt_lost_values.insert(0, 0)
+                
+                for i in range(len(pckt_lost_values) - 1):
+                    x1 = chart_x + i * point_width
+                    y1 = chart_y + chart_height - pckt_lost_values[i]
+                    x2 = chart_x + (i + 1) * point_width
+                    y2 = chart_y + chart_height - pckt_lost_values[i + 1]
 
-                cr.set_line_width(3)
-                cr.move_to(x1, y1)
-                cr.line_to(x2, y2)
-                cr.stroke()
+                    # 1. Black outline (thicker, behind the color)
+                    cr.set_source_rgb(0, 0, 0)
+                    cr.set_line_width(5)
+                    cr.move_to(x1, y1)
+                    cr.line_to(x2, y2)
+                    cr.stroke()
+
+                    # 2. Colored foreground based on average value of the segment
+                    avg_val = (pckt_lost_values[i] + pckt_lost_values[i + 1]) / 2
+                    if avg_val < 3:
+                        cr.set_source_rgb(0.0, 1.0, 0.0)  # Green
+                    elif avg_val <= chart_height-2 -1:
+                        cr.set_source_rgb(1.0, 1.0, 0.0)  # Yellow
+                    else:
+                        cr.set_source_rgb(1.0, 0.0, 0.0)  # Red
+
+                    cr.set_line_width(3)
+                    cr.move_to(x1, y1)
+                    cr.line_to(x2, y2)
+                    cr.stroke()
 
             row=row+1
-                        
+            # draw separator line if this stats line was skipped
+            if draw_separator:
+                cr.set_source_rgba(0, 0, 0, 0.3)   # semi-transparent black
+                cr.set_line_width(2*2)
+                cr.move_to(10, chart_y + chart_height*2 + 14)                
+                cr.line_to(chart_x + len(pckt_lost_values) * point_width - 2, chart_y + chart_height*2 + 14)
+                cr.stroke()
+                draw_separator = False
 
+                        
         gdk_cairo_surface = Gdk.cairo_surface_create_from_pixbuf(self.icon_pixbuf, 1, widget.get_window())
 
         # Draw the image at the specified coordinates
