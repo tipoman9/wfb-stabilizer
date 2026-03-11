@@ -1,4 +1,4 @@
-# connectes to wfb-ng server
+# connects to wfb-ng server, the official way to get stats
 # 
 
 import os
@@ -68,12 +68,13 @@ class wfb_srv_osd(Gtk.Window):
                                 print(f"{key}: {list(self.packet_history[key])}")
 
                             self.out_bytes = self.packet_history["out_bytes"][-1] if self.packet_history["out_bytes"] else None
-                            self.uniq = self.packet_history["uniq"][-1] if self.packet_history["all"] else None
-                            self.bad = self.packet_history["bad"][-1] if self.packet_history["bad"] else None
+                            # grab most recent values, fall back to 0 for arithmetic
+                            self.uniq = self.packet_history["uniq"][-1] if self.packet_history["all"] else 0
+                            self.bad = self.packet_history["bad"][-1] if self.packet_history["bad"] else 0
         
-                            self.all_bytes = self.packet_history["all_bytes"][-1] if self.packet_history["all_bytes"] else None
-                            self.lost = self.packet_history["lost"][-1] if self.packet_history["lost"] else None
-                            self.fec_rec =  self.packet_history["fec_rec"][-1] if self.packet_history["fec_rec"] else None
+                            self.all_bytes = self.packet_history["all_bytes"][-1] if self.packet_history["all_bytes"] else 0
+                            self.lost = self.packet_history["lost"][-1] if self.packet_history["lost"] else 0
+                            self.fec_rec =  self.packet_history["fec_rec"][-1] if self.packet_history["fec_rec"] else 0
                             self.RecoveredFrags =  0
 
                             for ant_id, stats in self.channel_stats.items():                        
@@ -144,8 +145,8 @@ class wfb_srv_osd(Gtk.Window):
         if visual and self.is_composited():
             self.set_visual(visual)
         
-        # Connect the draw event
-        self.connect("draw", self.on_draw)
+        # Connect the draw event via a safe wrapper that catches exceptions
+        self.connect("draw", self.safe_on_draw)
         
         # Set the window to be always on top
         self.set_keep_above(True)
@@ -211,6 +212,17 @@ class wfb_srv_osd(Gtk.Window):
         cr.fill()
 
     pair_mode=0 
+
+    def safe_on_draw(self, widget, cr):
+        """Wrapper around :meth:`on_draw` that prevents exceptions from stopping
+        the GTK main loop. If ``on_draw`` throws, we log the error and return
+        False so that GTK can continue scheduling redraws."""
+        try:
+            return self.on_draw(widget, cr)
+        except Exception as e:
+            print(f"safe_on_draw caught: {e}")
+            return False
+        
     def on_draw(self, widget, cr):
         fontsize=20
         # Clear the background with full transparency
@@ -297,8 +309,8 @@ class wfb_srv_osd(Gtk.Window):
                 elif snr < 20:
                     cr.set_source_rgb(1, 1, 0)          # yellow
                             
-                self.outlined(cr,  f"{stats.get('snr_avg', '')}", rowx, rowy-1, (0, 0, 0, 0.9),  2)
-                rowx += cr.text_extents(f"{stats.get('snr_avg', '')}").x_advance
+                self.outlined(cr,  f"{stats.get('snr_avg', 0):2d}", rowx, rowy-1, (0, 0, 0, 0.9),  2)
+                rowx += cr.text_extents(f"{stats.get('snr_avg', 0):2d}").x_advance
                 cr.select_font_face(fontname, cairo.FontSlant.NORMAL, cairo.FontWeight.NORMAL)
                 cr.set_font_size(fontsize)            
             # pkt lost
@@ -330,7 +342,7 @@ class wfb_srv_osd(Gtk.Window):
                     next_hist = self.antenna_history[next_key]['pkt_recv']
                     snr_avg_ttl = sum(self.antenna_history[next_key]['snr_avg'])
                     
-                    if len(pkt_recv_history) >= 10 and len(next_hist) >= 10 and snr_avg_ttl>100 :                        
+                    if len(pkt_recv_history) >= 10 and len(next_hist) >= 10 and snr_avg_ttl!=0 :                        
                         if list(self.antenna_history[card_index]['pkt_recv'])[-10:] == list(next_hist)[-10:] and sum(next_hist) > 100:                           
                             self.pair_mode=1 
                             chart_height *= 1

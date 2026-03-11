@@ -45,7 +45,7 @@ MSPOSDexecutable = [
     "/home/home/src/msposd/msposd",
     "--master", "127.0.0.1:14550",   	
     "--osd",
-    "-r", "150",
+    "-r", "25",
     "--ahi", "3",
     "--matrix", "11"
     #,"-v"
