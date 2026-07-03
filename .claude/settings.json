@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/home/src/msposd/osd/util/**)",
+      "Bash(git checkout *)",
+      "Read(//home/home/src/msposd/**)",
+      "Bash(grep -n \"forcefullscreen\" /home/home/src/msposd/osd/util/Render_gs.c | head -20)"
+    ]
+  }
+}

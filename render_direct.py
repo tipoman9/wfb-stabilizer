@@ -12,8 +12,16 @@ from pynput import keyboard
 import sys
 import pdb
 
-from osd_overlay import wfbOSDWindow 
+from osd_overlay import wfbOSDWindow
 from wfb_osd import wfb_srv_osd
+
+# Single-authority window stacking (video / msposd OSD / map) lives here; see
+# VideoPlayer._restack(). python-xlib is used for precise sibling restacking.
+try:
+    from Xlib import display as _xlib_display, X as _X
+    _HAVE_XLIB = True
+except Exception:
+    _HAVE_XLIB = False
 
 #show wfbstats
 wfbstats = False
@@ -41,14 +49,17 @@ sed_commands = (#set qOpenHD to h264 to free cpu
 
 subprocess.run(sed_commands, shell=True)
 
+#log = open("/tmp/msposd.log", "w")
+
 MSPOSDexecutable = [
     "/home/home/src/msposd/msposd",
     "--master", "127.0.0.1:14550",   	
     "--osd",
     "-r", "150",
+    "--out", "127.0.0.1:14560",    
     "--ahi", "4",
     "--matrix", "11"
-    #,"-v"
+#    ,"-v"
 ]	
 wfbstatPort=14550
 
@@ -90,7 +101,6 @@ class VideoPlayer:
 
         self.window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.window.set_title("GStreamer Fullscreen")
-        self.window.set_default_size(800, 600)
         self.window.set_decorated(False)
         self.window.fullscreen()
 
@@ -103,9 +113,89 @@ class VideoPlayer:
         self.create_pipeline()
         self.window.show_all()
 
+        # Window stacking (see _restack): re-assert every 400 ms so it self-heals
+        # whenever the WM reorders things (e.g. when the map window appears).
+        self._xdpy = None
+        GLib.timeout_add(400, self._restack)
+
         # Set up the keyboard listener
         self.listener = keyboard.Listener(on_press=self.on_key_press)
-        self.listener.start()    
+        self.listener.start()
+
+    # --- window stacking (single authority) ---------------------------------
+    def _xroot(self):
+        if self._xdpy is None:
+            self._xdpy = _xlib_display.Display()
+            self._xdpy.set_error_handler(lambda *a: 0)  # never die on a stale window
+        return self._xdpy, self._xdpy.screen().root
+
+    def _toplevel(self, xid):
+        """Resolve an X window id to its direct child-of-root ancestor (WM frame)."""
+        d, root = self._xroot()
+        w = d.create_resource_object('window', xid)
+        for _ in range(32):
+            t = w.query_tree()
+            if t.parent.id == root.id:
+                return w.id
+            w = t.parent
+        return xid
+
+    def _find_osd(self):
+        """The msposd OSD: a fullscreen override_redirect window at 0,0."""
+        d, root = self._xroot()
+        sw, sh = d.screen().width_in_pixels, d.screen().height_in_pixels
+        for c in root.query_tree().children:
+            try:
+                a, g = c.get_attributes(), c.get_geometry()
+            except Exception:
+                continue
+            if a.override_redirect and g.x == 0 and g.y == 0 \
+                    and g.width >= sw - 2 and g.height >= sh - 2:
+                return c.id
+        return None
+
+    def _active_window(self):
+        """Id of the WM's active window (_NET_ACTIVE_WINDOW), or None."""
+        d, root = self._xroot()
+        try:
+            p = root.get_full_property(
+                d.intern_atom('_NET_ACTIVE_WINDOW'), _X.AnyPropertyType)
+            if p and p.value:
+                return p.value[0]
+        except Exception:
+            pass
+        return None
+
+    def _restack(self):
+        """Keep the fullscreen video active (so it covers the taskbar), the OSD
+        raised on top, and the map between them -> video < map < OSD.
+
+        3-part contract with gs/mapwin and gs/map.sh: the taskbar is covered only
+        while the video is the *active* window (Xfwm compositor un-redirect), so
+        we keep re-asserting it as active here; the map deliberately never takes
+        focus (mapwin declines it and feeds the map its keys via a global grab —
+        see mapwin's header)."""
+        if not _HAVE_XLIB or self.window_handle == -1:
+            return True
+        try:
+            d, _ = self._xroot()
+            osd = self._find_osd()
+            if osd is None:
+                return True   # OSD not up yet
+            video = self._toplevel(self.window_handle)
+            wobj = lambda i: d.create_resource_object('window', i)
+            # Re-assert the video as the active window whenever it is not, else
+            # Xfwm drops the fullscreen video below the taskbar. Edge-triggered:
+            # only present() when it is NOT already active, else re-presenting
+            # every tick flickers the sink.
+            if self._active_window() not in (self.window_handle, video):
+                self.window.present()
+            wobj(video).configure(stack_mode=_X.Above)
+            wobj(osd).configure(stack_mode=_X.Above)
+            d.sync()
+        except Exception as e:
+            print(f"restack error: {e}")
+        return True
 
     def on_realize_cb(self, widget):
         window = widget.get_window()
