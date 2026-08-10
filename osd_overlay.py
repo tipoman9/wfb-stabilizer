@@ -8,9 +8,15 @@ gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GLib, GdkPixbuf, Pango, PangoCairo, cairo
 from pymavlink import mavutil
 import struct
+from stats_overlay import draw_stats
 
 
-class wfbOSDWindow(Gtk.Window):     
+class wfbOSDWindow(Gtk.Window):
+
+    # Set by render_direct.py when the 'stats' flag is on; None means no
+    # instrumentation is running and nothing is drawn.
+    stats = None
+    stats_mode = 1      # 0 hidden, 1 compact, 2 detail -- cycled with 's'
 
     def __init__(self, MavlinkPort=14550):
         self.MavlinkPort = MavlinkPort       
@@ -28,7 +34,10 @@ class wfbOSDWindow(Gtk.Window):
         
         # Set up the transparent window
         self.set_title("Mavlink Overlay")
-        self.set_default_size(380, 260)
+        # 300, not 260: the detail-mode stats block plus its jitter graph runs
+        # to y=271, and cairo clips anything past the window. The window is
+        # transparent, so the extra height is invisible when nothing draws there.
+        self.set_default_size(380, 300)
         self.set_app_paintable(True)
         self.set_decorated(False)
         #self.set_keep_above(True)
@@ -304,6 +313,12 @@ class wfbOSDWindow(Gtk.Window):
 
             row=row+1
                         
+
+        # Before the icon: a missing pixbuf raises below, and the stats line
+        # should survive that.
+        if self.stats is not None:
+            draw_stats(cr, self.outlined, self.stats.latest,
+                       mode=self.stats_mode)
 
         gdk_cairo_surface = Gdk.cairo_surface_create_from_pixbuf(self.icon_pixbuf, 1, widget.get_window())
 

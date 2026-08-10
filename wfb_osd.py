@@ -15,6 +15,7 @@ import threading
 import json
 from collections import defaultdict, deque
 import math
+from stats_overlay import draw_stats
 
 
 # Config
@@ -133,7 +134,10 @@ class wfb_srv_osd(Gtk.Window):
         
         # Set up the transparent window
         self.set_title("wfb-ng stats")
-        self.set_default_size(380, 260)
+        # 300, not 260: the detail-mode stats block plus its jitter graph runs
+        # to y=271, and cairo clips anything past the window. The window is
+        # transparent, so the extra height is invisible when nothing draws there.
+        self.set_default_size(380, 300)
         self.set_app_paintable(True)
         self.set_decorated(False)
         #self.set_keep_above(True)
@@ -211,7 +215,12 @@ class wfb_srv_osd(Gtk.Window):
         
         cr.fill()
 
-    pair_mode=0 
+    pair_mode=0
+
+    # Set by render_direct.py when the 'stats' flag is on; None means no
+    # instrumentation is running and nothing is drawn.
+    stats = None
+    stats_mode = 1      # 0 hidden, 1 compact, 2 detail -- cycled with 's'
 
     def safe_on_draw(self, widget, cr):
         """Wrapper around :meth:`on_draw` that prevents exceptions from stopping
@@ -403,6 +412,12 @@ class wfb_srv_osd(Gtk.Window):
                 draw_separator = False
 
                         
+        # Before the icon: a missing pixbuf raises below, and the stats line
+        # should survive that.
+        if self.stats is not None:
+            draw_stats(cr, self.outlined, self.stats.latest,
+                       mode=self.stats_mode)
+
         gdk_cairo_surface = Gdk.cairo_surface_create_from_pixbuf(self.icon_pixbuf, 1, widget.get_window())
 
         # Draw the image at the specified coordinates

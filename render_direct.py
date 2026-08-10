@@ -14,6 +14,7 @@ import pdb
 
 from osd_overlay import wfbOSDWindow
 from wfb_osd import wfb_srv_osd
+from stream_stats import StreamStats
 
 # Single-authority window stacking (video / msposd OSD / map) lives here; see
 # VideoPlayer._restack(). python-xlib is used for precise sibling restacking.
@@ -25,6 +26,11 @@ except Exception:
 
 #show wfbstats
 wfbstats = False
+
+#measure real fps / arrival jitter, 'stats' on the command line ('statscsv' also
+#logs a per-frame row for offline analysis). See stream_stats.py.
+streamstats = False
+streamstats_csv = None
 
 StartOSDApp=False
 # for Intel HW acceleration
@@ -89,13 +95,20 @@ class VideoPlayer:
         Gst.init(None)
         Gtk.init(None)
     
-        #Start simple mavlink stats if no qOpenHD        
-        if wfbstats:  
+        # Must exist before create_pipeline(), which attaches the probes, and
+        # before the OSD window, which renders its snapshots.
+        self.stats = StreamStats(streamstats_csv) if streamstats else None
+        self.osd_win = None
+
+        #Start simple mavlink stats if no qOpenHD
+        if wfbstats:
             if os.path.exists('/tmp/wfb_server_started'):
-                win = wfb_srv_osd()
+                self.osd_win = wfb_srv_osd()
             else:
-                win = wfbOSDWindow(wfbstatPort)
-            
+                self.osd_win = wfbOSDWindow(wfbstatPort)
+            self.osd_win.stats = self.stats
+        elif self.stats:
+            print("stats: no OSD window (add 'wfbstats' or 'msposd') -- console only")
 
         self.loop = GLib.MainLoop()
 
@@ -117,6 +130,9 @@ class VideoPlayer:
         # whenever the WM reorders things (e.g. when the map window appears).
         self._xdpy = None
         GLib.timeout_add(400, self._restack)
+
+        if self.stats:
+            GLib.timeout_add(1000, self.stats.tick)
 
         # Set up the keyboard listener
         self.listener = keyboard.Listener(on_press=self.on_key_press)
@@ -210,33 +226,6 @@ class VideoPlayer:
         self.window_handle = window.get_xid()
         self.video_sink.set_window_handle(self.window_handle)
 
-    def pad_probe_callback(self, pad, info):
-        if info.type & Gst.PadProbeType.BUFFER:
-            buffer = info.get_buffer()
-            try:
-                #print("pad_probe_callback  STEP 1")                        
-                success, rtp_buffer = GstRtp.RTPBuffer.map(buffer, Gst.MapFlags.READ)
-                if not success:
-                    raise RuntimeError("Failed to map RTP buffer")
-                
-                current_seq_num = rtp_buffer.get_seq()
-                #print(f"pad_probe_callback  STEP 2 {current_seq_num}")        
-                if self.last_seq_num is not None and current_seq_num < self.last_seq_num:
-                    print(f"Out-of-order packet detected! Current sequence: {current_seq_num}, Last sequence: {self.last_seq_num}")
-
-
-                self.last_seq_num = current_seq_num
-
-            except Exception as e:                
-                print(f"Error processing RTP buffer: {str(e)}")
-
-            finally:
-                # Always unmap the RTP buffer, even if an error occurs
-                if 'rtp_buffer' in locals():
-                    GstRtp.RTPBuffer.unmap(rtp_buffer)
-
-        return Gst.PadProbeReturn.OK     
-
     def print_pipeline_elements(self):
         elements = self.pipeline.iterate_elements()
         while True:
@@ -250,24 +239,18 @@ class VideoPlayer:
         self.pipeline = Gst.parse_launch(pipeline_str)
         self.video_sink = self.pipeline.get_by_name("video_sink")        
         self.print_pipeline_elements()
-        # HOOK TO rtpjitterbuffer element to inspect
-        # try:                   
-        #     rtpjitterbuffer = self.pipeline.get_by_name('rtpjitterbuffer0')     
-        #     if rtpjitterbuffer is not None:
-        #         src_pad = rtpjitterbuffer.get_static_pad('src')
-        #         if src_pad is not None:
-        #             src_pad.add_probe(Gst.PadProbeType.BUFFER, self.pad_probe_callback)
-        # except Exception as e:
-        #      print(f"Error  HOOK TO rtpjitterbuffer: {str(e)}")
+        if self.stats:
+            self.stats.attach(self.pipeline)
 
         self.bus = self.pipeline.get_bus()
         self.bus.add_signal_watch()
-        self.bus.connect('message', self.on_bus_message)
+        self._bus_handler = self.bus.connect('message', self.on_bus_message)
         if self.window_handle!=-1:
             self.video_sink.set_window_handle(self.window_handle)
         
     def on_bus_message(self, bus, message):
-        print(f"Stream message: {message.type}")
+        if not self.stats:
+            print(f"Stream message: {message.type}")
         if message.type == Gst.MessageType.STREAM_START:
             if StartOSDApp:
                 StartOpenHD()      
@@ -278,8 +261,11 @@ class VideoPlayer:
         if message.type == Gst.MessageType.EOS:
             #self.loop.quit()
             self.restart_pipeline()
-        if message.type == Gst.MessageType.QOS:            
-            self.restart_pipeline()
+        if message.type == Gst.MessageType.QOS:
+            # QoS reports are routine flow control and carry the decoder's own
+            # processed/dropped counters -- record them, never restart on them.
+            if self.stats:
+                self.stats.note_qos(message)
         elif message.type == Gst.MessageType.ERROR:
             err, debug_info = message.parse_error()
             print(f"Error received from element {message.src.get_name()}: {err.message}")
@@ -292,14 +278,24 @@ class VideoPlayer:
             if key.char and key.char.lower() == 'q':
                 #self.restart_pipeline()
                 self.quit()
+            elif key.char and key.char.lower() == 's' and self.osd_win is not None:
+                # off -> compact -> detail. Redraw is driven by the OSD's own
+                # timer, so there is nothing to queue from here.
+                self.osd_win.stats_mode = (self.osd_win.stats_mode + 1) % 3
         except AttributeError:
             if key == keyboard.Key.esc:
                 self.restart_pipeline()
                 #self.quit()
 
     def restart_pipeline(self):
-        
+        if self.stats:
+            self.stats.detach()
+            self.stats.reset()
         self.pipeline.set_state(Gst.State.NULL)
+        # Drop the old bus watch: its GSource holds a ref to the bus, which
+        # holds the old pipeline alive for the rest of the process.
+        self.bus.disconnect(self._bus_handler)
+        self.bus.remove_signal_watch()
         time.sleep(0.1)
         self.create_pipeline()
         self.pipeline.set_state(Gst.State.PLAYING)
@@ -314,6 +310,8 @@ class VideoPlayer:
         self.loop.run()
         #    print(f"Restarting Decoder")
         self.pipeline.set_state(Gst.State.NULL)
+        if self.stats:
+            self.stats.close()
 
 if __name__ == '__main__':  
         # Check if 'NoOSD' is in the command-line arguments
@@ -327,10 +325,15 @@ if __name__ == '__main__':
         wfbstatPort=14551
         OSDexecutable = MSPOSDexecutable
 
-    if 'wfbstats' in sys.argv: 
-        StartOSDApp=False   
-        wfbstats=True   
-        
+    if 'wfbstats' in sys.argv:
+        StartOSDApp=False
+        wfbstats=True
+
+    if 'stats' in sys.argv or 'statscsv' in sys.argv:
+        streamstats=True
+    if 'statscsv' in sys.argv:
+        streamstats_csv='/tmp/stream_stats.csv'
+
 
         #StartOpenHD()      
     while True :
