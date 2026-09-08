@@ -71,6 +71,14 @@ TINY_FRAME_FRACTION = 0.05
 # frame, one pixel per entry. Kept separate from `window` because that one is
 # trimmed by time (5 s), which at 30 fps would not hold 200 frames.
 GRAPH_FRAMES = 200
+# Setting do-lost on the jitterbuffer makes it emit GstRTPPacketLost, which is
+# the only way to get precise loss timestamps (the `evt` counter). It is off by
+# default because it is the one thing here that changes what the pipeline
+# *does* rather than just observing it: with it on, rtph265depay discards a
+# partial access unit on loss instead of assembling what arrived. The
+# jitterbuffer's own num-lost already gives the loss count, so `evt` is
+# redundant -- not worth perturbing the video path for.
+ENABLE_DO_LOST = False
 
 _JB_FIELDS = ('num-pushed', 'num-lost', 'num-late', 'num-duplicates',
               'avg-jitter', 'rtx-count', 'rtx-success-count')
@@ -163,6 +171,8 @@ class StreamStats:
         30 fps."""
         self.window = deque(maxlen=WINDOW)
         self.d_series = deque(maxlen=GRAPH_FRAMES)   # ms, None where undefined
+        self.key_series = deque(maxlen=GRAPH_FRAMES) # keyframe flag, aligned
+        self.keyframes = 0
         self._last_arrival = None
         self._last_pts = None
         self._T = None             # nominal frame period in ns, set by tick()
@@ -203,9 +213,11 @@ class StreamStats:
         depay = _find_element(pipeline, 'depay')
         self._jb = _find_element(pipeline, 'rtpjitterbuffer')
 
-        if self._jb is not None:
-            # do-lost defaults to false, so without this the jitterbuffer never
-            # emits GstRTPPacketLost and the loss probe below is dead weight.
+        if self._jb is not None and ENABLE_DO_LOST:
+            # Off by default: see the ENABLE_DO_LOST comment above. Without it
+            # the jitterbuffer never emits GstRTPPacketLost, so the event probe
+            # below stays installed but only ever sees GAP events, and the
+            # `evt` counter reads 0.
             try:
                 if not self._jb.get_property('do-lost'):
                     self._jb.set_property('do-lost', True)
@@ -256,10 +268,17 @@ class StreamStats:
         pts = buf.pts
         has_pts = pts != Gst.CLOCK_TIME_NONE
         discont = buf.has_flags(Gst.BufferFlags.DISCONT)
+        # GStreamer marks predicted frames DELTA_UNIT, so its absence is a
+        # keyframe. rtph265depay sets this from the IRAP NAL types, which is
+        # both cheaper and more reliable than parsing NALs or guessing from
+        # frame size (rate control flattens I-frames to ~1.6x a P-frame).
+        keyframe = not buf.has_flags(Gst.BufferFlags.DELTA_UNIT)
         size = buf.get_size()
 
         with self._lock:
             self.frames += 1
+            if keyframe:
+                self.keyframes += 1
             if discont:
                 self.discont += 1
             if not has_pts:
@@ -318,7 +337,11 @@ class StreamStats:
             self.window.append((now, dt_a, dt_s, d, size))
             # One entry per frame, including the undefined ones -- a blank
             # column in the graph is honest about a frame we could not time.
+            # Appended together with key_series so the two stay index-aligned
+            # for the renderer (the very first frame exits above, so its
+            # keyframe marker is the one that never reaches the chart).
             self.d_series.append(None if d is None else d / 1e6)
+            self.key_series.append(keyframe)
 
             if self._csv is not None and len(self._csv_rows) < CSV_BACKLOG_MAX:
                 self._csv_rows.append((now, dt_a, dt_s, d, discont))
@@ -366,6 +389,7 @@ class StreamStats:
                 self.window.popleft()
             window = list(self.window)
             d_series = list(self.d_series)
+            key_series = list(self.key_series)
             rows, self._csv_rows = self._csv_rows, []
             self.jb_dup_total += jb.get('dup', 0)
 
@@ -384,7 +408,8 @@ class StreamStats:
                        discont=self.discont, lost_events=self.lost_events,
                        gap_events=self.gap_events, qos_dropped=self.qos_dropped,
                        dup_pts=self.dup_pts, reorder=self.reorder,
-                       tiny=self.tiny_frames, jb_dup=self.jb_dup_total)
+                       tiny=self.tiny_frames, jb_dup=self.jb_dup_total,
+                       keyframes=self.keyframes)
             prev, self._prev = self._prev, cur
             self._history.append(cur)
             oldest = self._history[0]
@@ -422,13 +447,14 @@ class StreamStats:
             return True  # first tick only establishes the baseline
 
         snap = self._build(now, elapsed, window, T, cur, prev, oldest, totals,
-                           jb, jitter_ms, peak_j, frozen_for, d_series)
+                           jb, jitter_ms, peak_j, frozen_for, d_series,
+                           key_series)
         self.latest = snap            # published for the OSD; never mutated
         print("[stats] " + self._console_line(snap))
         return True
 
     def _build(self, now, elapsed, window, T, cur, prev, oldest, totals, jb,
-               jitter_ms, peak_j, frozen_for, d_series):
+               jitter_ms, peak_j, frozen_for, d_series, key_series):
         """Assemble the published snapshot: values plus a severity per field.
 
         Thresholds live here and nowhere else, so the renderer stays dumb and
@@ -490,6 +516,11 @@ class StreamStats:
             'frozen': (frozen_for / 1e9) if frozen_for is not None else None,
             'tot': totals,
             'd_series': d_series,
+            'key_series': key_series,
+            # Keyframes per 10 s. Zero after startup means the encoder is using
+            # intra-refresh or an effectively infinite GOP -- there are simply
+            # no I-frames to mark, which is common on FPV links.
+            'key': roll('keyframes'),
         }
         snap['sev'] = max(snap['fps_sev'], snap['jit_sev'], snap['stut_sev'],
                           snap['miss_sev'], snap['dup_sev'], snap['clk_sev'],
@@ -514,6 +545,7 @@ class StreamStats:
             f"gap {s['gap']} (slots {s['gap_slots']}) "
             f"lost-frame {s['lost_frame']} cam-stall {s['cam_stall']}",
             f"dup {s['dup_pts']}/{s['jb_dup']} reord {s['reorder']} tiny {s['tiny']}",
+            f"key {s['key']}/10s",
             jb_txt,
             f"qos-drop {s['qos_drop']}",
             f"tot: f {s['tot']['frames']} miss {s['tot']['miss']} "

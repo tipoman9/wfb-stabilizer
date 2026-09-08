@@ -39,6 +39,14 @@ GRAPH_GAP = 6          # vertical space between the last text line and the plot
 # either way, this only controls what is drawn on screen.
 SHOW_DETAIL_TEXT = False
 
+# Jitter chart style. True (the default) fills the whole bar from the axis to
+# the value, giving a solid envelope. False draws only a short stub at the tip
+# -- GRAPH_STUB pixels of the bar, measured back towards the axis -- so the
+# trace reads as a connected line while leaving the middle of the plot open.
+# Set here, or pass graph_bars= per call.
+GRAPH_BARS = True
+GRAPH_STUB = 5          # stub length in pixels, used when GRAPH_BARS is False
+
 
 def _c3(v):
     """Count in exactly 3 columns. Fixed width matters more than the exact
@@ -68,12 +76,20 @@ def _ms(v):
     return f"{min(float(v), 99.9):5.1f}"
 
 
-def _draw_graph(cr, series, x, top, t_ms, w=GRAPH_W, h=GRAPH_H):
+def _draw_graph(cr, series, x, top, t_ms, keys=None, bars=None,
+                w=GRAPH_W, h=GRAPH_H):
     """Per-frame arrival deviation D, one pixel column per frame.
 
     Positive D (frame arrived later than the sender's cadence predicts) goes
     above the axis, negative below -- the same sign convention as the D p50/p95
     figures printed on the line above.
+
+    `keys` is the aligned keyframe flag series; each true entry gets a small
+    white arrow along the bottom edge, so I-frame bandwidth spikes can be lined
+    up against the jitter they cause.
+
+    `bars` selects the style: False draws a GRAPH_STUB-pixel stub at each
+    sample's value, True fills from the axis to it. Defaults to GRAPH_BARS.
 
     Colour bands come from the frame period, not from the graph's own scale, so
     changing GRAPH_H changes the visible range without silently reclassifying
@@ -95,21 +111,59 @@ def _draw_graph(cr, series, x, top, t_ms, w=GRAPH_W, h=GRAPH_H):
     cr.line_to(x + w, axis + 0.5)
     cr.stroke()
 
+    if bars is None:
+        bars = GRAPH_BARS
+
     if not series:
         return
+    # Grouped by severity so the whole plot takes three fills rather than one
+    # per sample.
+    buckets = ([], [], [])
     for i, d in enumerate(series[-w:]):
         if d is None:               # frame we could not time -- leave a blank
             continue
         v = max(-half, min(half, d))
         if abs(d) > half or abs(d) >= bad:
-            cr.set_source_rgb(*SEV_RGB[2])
+            sev = 2
         elif abs(d) >= warn:
-            cr.set_source_rgb(*SEV_RGB[1])
+            sev = 1
         else:
-            cr.set_source_rgb(*SEV_RGB[0])
-        # Bar from the axis to the value; height >= 1 so a near-zero sample is
-        # still a visible pixel on the axis.
-        cr.rectangle(x + i, axis - max(v, 0.0), 1, max(1.0, abs(v)))
+            sev = 0
+        if bars:
+            # Fill from the axis to the value; height >= 1 so a near-zero
+            # sample is still a visible pixel on the axis.
+            buckets[sev].append((x + i, axis - max(v, 0.0), 1, max(1.0, abs(v))))
+        else:
+            # The last GRAPH_STUB pixels of the bar, anchored at the tip and
+            # measured back towards the axis. Never longer than the bar itself,
+            # so it cannot reach past the plot edges.
+            tip = axis - v
+            seg = max(1.0, min(abs(v), float(GRAPH_STUB)))
+            buckets[sev].append(
+                (x + i, tip if v >= 0 else tip - seg, 1, seg))
+    for sev, rects in enumerate(buckets):
+        if not rects:
+            continue
+        cr.set_source_rgb(*SEV_RGB[sev])
+        for r in rects:
+            cr.rectangle(*r)
+        cr.fill()
+
+    if keys:
+        # A small upward arrow per keyframe: three columns 2/4/2 px tall rising
+        # from the bottom edge. Wider than a single line reads far better
+        # against the horizontal noise of the trace. Drawn last so a marker is
+        # never buried under a bar, and only 4 px tall, so it collides with a
+        # sample only at the very bottom of the scale.
+        cr.set_source_rgb(1, 1, 1)
+        base = top + h
+        for i, k in enumerate(keys[-w:]):
+            if not k:
+                continue
+            for dx, tick in ((-1, 2), (0, 4), (1, 2)):
+                col = x + i + dx
+                if x <= col < x + w:        # keep the arrow inside the plot
+                    cr.rectangle(col, base - tick, 1, tick)
         cr.fill()
 
 
@@ -170,7 +224,8 @@ def _detail_lines(snap):
 
 
 def draw_stats(cr, outlined, snap, x=6, y=190, mode=1, font_size=15,
-               line_h=17, bg_alpha=0.4, pad=5, detail_text=None):
+               line_h=17, bg_alpha=0.4, pad=5, detail_text=None,
+               graph_bars=None):
     """Render the stats block over a semi-transparent backing rectangle.
 
     mode 0 hidden, 1 compact (one line), 2 detail (adds three lines).
@@ -225,4 +280,5 @@ def draw_stats(cr, outlined, snap, x=6, y=190, mode=1, font_size=15,
 
     if graph is not None:
         nom = snap['nom']
-        _draw_graph(cr, graph, x, graph_top, 1000.0 / nom if nom else 20.0)
+        _draw_graph(cr, graph, x, graph_top, 1000.0 / nom if nom else 20.0,
+                    snap.get('key_series'), graph_bars)
