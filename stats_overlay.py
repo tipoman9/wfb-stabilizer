@@ -47,6 +47,13 @@ SHOW_DETAIL_TEXT = False
 GRAPH_BARS = True
 GRAPH_STUB = 5          # stub length in pixels, used when GRAPH_BARS is False
 
+# Receiver-side delay (rx / sck / jb / dec) is not drawn. It measures what it
+# claims, but it is a few tenths of a millisecond and is not where the latency
+# fault lives -- see latency_meter_tests.md. Kept here rather than deleted so it
+# can be turned back on; stream_stats.ENABLE_LATENCY must be True as well, or
+# the fields are never published in the first place.
+SHOW_LATENCY = False
+
 
 def _c3(v):
     """Count in exactly 3 columns. Fixed width matters more than the exact
@@ -74,6 +81,18 @@ def _k(v):
 def _ms(v):
     """Millisecond value clamped to 5 columns."""
     return f"{min(float(v), 99.9):5.1f}"
+
+
+def _ms4(v):
+    """Whole milliseconds in exactly 4 columns, or '  --' when unmeasured.
+
+    Whole ms rather than one decimal because this renders receiver-side delay,
+    which is a fraction of a millisecond when healthy but must still fit a
+    four-digit column when a stall backs the pipeline up.
+    """
+    if v is None:
+        return "  --"
+    return f"{min(float(v), 9999.0):4.0f}"
 
 
 def _draw_graph(cr, series, x, top, t_ms, keys=None, bars=None,
@@ -189,6 +208,15 @@ def _compact_line(snap):
             (f" J{_ms(snap['jit'])}", snap['jit_sev']),
             (f" st{min(snap['stut'], 100.0):3.0f}%", snap['stut_sev']),
         ]
+        # End-to-end delay earns permanent space rather than appearing only
+        # when bad: unlike miss/dup it is a level, not an event, and reading it
+        # means comparing it against what it was a minute ago.
+        # What this receiver is holding. Not end-to-end latency -- see
+        # latency_meter_tests.md -- so it is labelled rx, and `clk` in detail
+        # mode is what flags a sender whose timeline has stopped tracking
+        # reality.
+        if SHOW_LATENCY and snap.get('lat') is not None:
+            segs.append((f" rx{_ms4(snap['lat'])}", snap['lat_sev']))
     # miss/dup appear only when non-zero -- their presence is itself the alarm,
     # and the box shrinks back once the fault ages out of the 10 s window.
     if snap['miss']:
@@ -202,12 +230,22 @@ def _detail_lines(snap):
     clk = f"{snap['clk']:.3f}" if snap['clk'] is not None else " --  "
     jb = snap['jb']
     tot = snap['tot']
+    # What the compact line's `rx` is made of. Appended to the first row rather
+    # than given a row of its own so the detail block keeps the height
+    # draw_stats() documents, and only when that figure is being shown at all.
+    rx = []
+    if SHOW_LATENCY:
+        rx = [
+            (f" sck{_ms4(snap.get('lat_sock'))}", 0),
+            (f" jb{_ms4(snap.get('lat_jb'))}", 0),
+            (f" dec{_ms4(snap.get('lat_dec'))}", 0),
+        ]
     return [
         [
             (f"nom{min(snap['nom'], 999.9):5.1f} ", 0),
             (f"clk {clk}", snap['clk_sev']),
             (f" pk{_ms(snap['jit_peak'])}", 0),
-        ],
+        ] + rx,
         [
             (f"D{snap['d50']:+5.1f}/{snap['d95']:+5.1f}/{snap['d05']:+5.1f}", 0),
             (f" gap{_c3(snap['gap'])}", 0),

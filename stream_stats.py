@@ -1,10 +1,13 @@
 """Stream cadence instrumentation for render_direct.py.
 
-Answers two questions at runtime: what is the *real* decoded frame rate, and is
+Answers three questions at runtime: what is the *real* decoded frame rate, is
 the arrival cadence jittery / gappy (a frame that shows up late, early, or not
-at all).
+at all), and how much delay this receiver itself is holding (`lat`, source B).
 
-Two measurement sources, both cheap enough to leave running:
+It deliberately does NOT report end-to-end latency; see the section below on why
+that is not computable from this stream.
+
+Three measurement sources, all cheap enough to leave running:
 
   C) The rtpjitterbuffer's own bookkeeping -- its `stats` property polled once a
      second from the main loop (num-pushed / num-lost / num-late /
@@ -28,7 +31,103 @@ Two measurement sources, both cheap enough to leave running:
      than the nominal period means the *camera* skipped, which is a different
      fault from the link dropping frames.
 
-Caveat: the probe sits *after* the rtpjitterbuffer, which absorbs up to its
+  B) Receiver-side delay (`lat`), from RTP timestamp *differences* read straight
+     off the packets on the rtpjitterbuffer's two pads:
+
+         jb  = (newest RTP ts arrived - RTP ts being released) / 90 kHz
+         dec = monotonic time from the depayloader pushing a frame to that
+               frame reaching the sink
+         lat = jb + dec
+
+     `jb` is how far behind the live edge of the stream the picture being
+     handed to the display is: the media time the jitterbuffer is sitting on.
+     It is the number that grows when the pipeline takes on backlog, and with
+     `sync=false` on the sink and `drop-on-latency=false` on the jitterbuffer
+     nothing ever gives that backlog back.
+
+     Why a difference of RTP timestamps and not a PTS.  An earlier version of
+     this computed
+
+         clock.get_time() - sink.get_base_time() - to_running_time(buf.pts)
+
+     and that is unsound here, in two independent ways.  It subtracts two
+     unrelated epochs -- base_time is the receiver's clock at the moment the
+     pipeline reached PLAYING, while the PTS counts media time from an origin
+     the jitterbuffer picked out of the RTP stream -- so the result is the true
+     delay plus an arbitrary constant, which is why it could read -200 ms on a
+     link measured at 100 ms screen to screen.  And `mode=0` runs no skew
+     correction, so the sender's and receiver's clock *rates* diverge freely
+     and the difference integrates that divergence: 1000 ppm, ordinary for a
+     camera oscillator, is 1 ms per second, i.e. 3.6 s per hour of pure
+     fiction.  The `clk` field in source A is that very ratio.
+
+     A difference of two RTP timestamps sampled at one instant has neither
+     defect.  Both come from the same sender clock, so its rate cancels; both
+     are offsets from the same origin, so the origin cancels; and a
+     jitterbuffer resync re-origins both sides together, so a discontinuity
+     does not shift it.
+
+     What `lat` is not: glass-to-glass.  Camera exposure, encode and air time
+     happen before the first byte reaches this machine and cannot be seen from
+     here, and the display's own pipeline is after the sink.  Expect `lat` to
+     read well below a stopwatch measurement -- roughly the jitterbuffer's
+     configured `latency` plus a few ms -- and to be the part that moves when
+     latency misbehaves.
+
+WHY THERE IS NO LATENCY FIELD, and why one cannot be added.
+
+An obvious thing to want here is "how old is the picture on screen".  It is not
+computable from this stream, and three successive attempts to compute it all
+failed in the same underlying way, so the reasoning is recorded rather than
+repeated.
+
+Measuring latency needs a time reference shared with the camera.  This stream
+carries none: there is no RTCP, so no sender report ever maps an RTP timestamp
+to a wall clock, and the two machines' clocks are not synchronised.  That leaves
+only the RTP timestamps themselves -- and measurement shows they are a *frame
+counter*, not a capture clock:
+
+    RTP ts increment per frame: 1525 ticks = 16.944 ms  x2261  (100.0% of frames)
+    frames arriving: 50.2 fps      seq_lost: 0
+    media time advanced 38.31 s while wall advanced 45.03 s -> ratio 0.8509
+
+Every frame advances the timestamp by exactly one 59 fps period no matter how
+much real time passed.  So when the encoder drops frames -- above, 50.2 fps
+emitted against a nominal 59, with zero packet loss, i.e. dropped before
+transmission -- the media timeline simply runs slow, here at 0.85x.  Anything of
+the form `arrival - rtp_timestamp` then climbs at 149 ms/s while the true
+latency does not move at all: about 3 s of pure fiction every 20 s.  Forcing
+frame drops was exactly how this was demonstrated.
+
+The same defect sank the earlier attempts, which are worth naming so they are
+not tried again:
+
+    clock.get_time() - base_time - to_running_time(pts)
+        Subtracts two unrelated epochs (the receiver's PLAYING moment, and an
+        origin the jitterbuffer picked out of the RTP stream), so it is the true
+        delay plus an arbitrary constant -- it read -200 ms on a link measured
+        at 100 ms screen to screen -- and it integrates sender/receiver clock
+        rate divergence on top.
+    d - min(d) over the run, with a growth rate
+        Same arrival-minus-timestamp quantity, so the frame-counter problem
+        above applies directly; the all-time minimum also turns any slow drift
+        into unbounded accumulation.
+
+What remains, and is sound, is the split in B): the delay *this receiver* is
+holding, measured from timestamp differences taken at one instant and from the
+monotonic clock, with no cross-clock arithmetic anywhere.  On a healthy link it
+reads a few tenths of a millisecond, and it is genuinely near zero -- this
+pipeline adds almost nothing.  When the picture is late and `sock`, `jb` and
+`dec` are all small, the delay is upstream, and `clk` (source A) is the field
+that says so: it is the ratio of media time to arrival time, 1.00 when the
+sender's timeline tracks reality and 0.85 in the dropping case above.  It
+identifies the fault without pretending to put a millisecond figure on it.
+
+Genuinely measuring end-to-end latency would need a shared reference: RTCP
+sender reports plus NTP/PTP on both ends, or a timestamp burnt into the video
+by the camera.  Neither exists here.
+
+Caveat: the A) probe sits *after* the rtpjitterbuffer, which absorbs up to its
 `latency` ms of jitter.  These numbers describe what the decoder and the display
 actually experienced -- the right thing for FPS and freezes -- but they
 understate raw over-the-air jitter.  Seeing that needs a probe on the udpsrc src
@@ -79,6 +178,34 @@ GRAPH_FRAMES = 200
 # jitterbuffer's own num-lost already gives the loss count, so `evt` is
 # redundant -- not worth perturbing the video path for.
 ENABLE_DO_LOST = False
+# Source B (the sock/jb/dec delay figures) is off. It measures what it claims --
+# unlike the three attempts before it, which is the point of the write-up in
+# latency_meter_tests.md -- but what it measures is only the delay this receiver
+# holds, which is a few tenths of a millisecond and is not where the latency
+# fault lives. Off rather than deleted so it can be turned back on: with this
+# False no probes are installed, so there is no per-packet cost and no fields
+# are published. stats_overlay.SHOW_LATENCY controls drawing separately.
+ENABLE_LATENCY = False
+# Receiver-side delay budget: the jitterbuffer's configured `latency` plus this
+# many frame periods for depay, decode, convert and render. Delay beyond the
+# budget is backlog the pipeline has taken on.
+LAT_BUDGET_FRAMES = 2
+# Delay in excess of the budget that counts as warn / bad, in ms. Deliberately
+# well under one frame period at the low end: an extra 60 ms that does not come
+# back is already a real fault, not jitter.
+LAT_WARN_MS = 60.0
+LAT_BAD_MS = 200.0
+# RTP runs at 90 kHz for video, as the SRC caps declare.
+RTP_CLOCK_HZ = 90000
+# RTP timestamps are 32-bit and wrap every 13.25 hours at 90 kHz; a difference
+# above the half-range is really a negative one.
+RTP_WRAP = 1 << 32
+RTP_HALF = RTP_WRAP >> 1
+# Offset of the 32-bit timestamp in the RTP fixed header, and the length of that
+# header. Header extensions and CSRCs come after both, so these hold for every
+# packet.
+RTP_TS_OFFSET = 4
+RTP_HDR_BYTES = 12
 
 _JB_FIELDS = ('num-pushed', 'num-lost', 'num-late', 'num-duplicates',
               'avg-jitter', 'rtx-count', 'rtx-success-count')
@@ -102,6 +229,24 @@ def _find_element(pipeline, suffix):
         factory = element.get_factory()
         if factory and factory.get_name().endswith(suffix):
             return element
+
+
+def _find_sink(pipeline):
+    """The video sink. Named `video_sink` in every SRC variant in
+    render_direct.py, but fall back to the bin's own sink iterator so an unnamed
+    or renamed sink still gets instrumented."""
+    element = pipeline.get_by_name('video_sink')
+    if element is not None:
+        return element
+    it = pipeline.iterate_sinks()
+    while True:
+        result, element = it.next()
+        if result == Gst.IteratorResult.RESYNC:
+            it.resync()
+            continue
+        if result != Gst.IteratorResult.OK:
+            return None
+        return element
 
 
 def _sget(structure, name):
@@ -131,6 +276,63 @@ def _median(values):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
+def _sock_queue(port):
+    """(rx_queue bytes, drops) for the UDP socket bound to `port`, or None.
+
+    The kernel receive buffer is the one place receiver-side backlog can hide
+    from a pad probe: packets sitting there have not been read yet, so nothing
+    inside the pipeline has seen them. With no queue element in the SRC and the
+    jitterbuffer not buffering under mode=0, it is also the only place a full
+    second of backlog can actually accumulate -- which is why it is worth the
+    once-a-second read of /proc.
+    """
+    for path in ('/proc/net/udp', '/proc/net/udp6'):
+        try:
+            with open(path) as fh:
+                next(fh, None)          # header row
+                for line in fh:
+                    f = line.split()
+                    if len(f) < 5:
+                        continue
+                    try:
+                        if int(f[1].split(':')[1], 16) != port:
+                            continue
+                        tx_rx = f[4].split(':')
+                        return int(tx_rx[1], 16), int(f[-1])
+                    except (ValueError, IndexError):
+                        continue
+        except OSError:
+            continue
+    return None
+
+
+def _rtp_hdr(buf):
+    """(ssrc, timestamp) from the RTP fixed header, or None if the buffer is too
+    short to hold one.
+
+    The SSRC is not optional bookkeeping here. Measured on a live wfb feed, port
+    5600 carries a *second* RTP stream (pt=98, ssrc=1494278274) alongside the
+    video (pt=97, ssrc=623207795), and their timestamp origins are unrelated --
+    mixing them produced differences of about -9735 s. Every reading is
+    therefore confined to one SSRC.
+
+    extract_dup() rather than map(): it copies the twelve bytes wanted instead
+    of exposing the whole packet, which matters on a per-packet probe.
+    """
+    raw = buf.extract_dup(0, RTP_HDR_BYTES)
+    if raw is None or len(raw) != RTP_HDR_BYTES:
+        return None
+    return (int.from_bytes(raw[8:12], 'big'),
+            int.from_bytes(raw[RTP_TS_OFFSET:RTP_TS_OFFSET + 4], 'big'))
+
+
+def _f(value, width=6, prec=1):
+    """Fixed-width float, or a right-aligned '--' when there is no value yet."""
+    if value is None:
+        return "--".rjust(width)
+    return f"{value:{width}.{prec}f}"
+
+
 def _sev(value, warn, bad):
     """0 ok / 1 warn / 2 bad."""
     if bad and value >= bad:
@@ -148,6 +350,10 @@ class StreamStats:
         self._jb = None            # rtpjitterbuffer element, if the SRC has one
         self._jb_prev = None       # previous stats snapshot, for per-second deltas
         self._jb_dumped = False
+        self._jb_latency_ms = None # the jitterbuffer's configured latency
+        self._sink = None          # video sink, for the end-to-end delay probe
+        self._udp_port = None      # udpsrc's port, for the socket-queue read
+        self._sock_drops0 = None   # drops at attach, so the count is per-run
         self._csv = None
         self._csv_rows = []
         self.restarts = 0
@@ -155,7 +361,8 @@ class StreamStats:
         if csv_path:
             try:
                 self._csv = open(csv_path, 'w', buffering=1 << 16)
-                self._csv.write('t_ms,dt_arrival_us,dt_sender_us,d_us,discont\n')
+                self._csv.write(
+                    't_ms,dt_arrival_us,dt_sender_us,d_us,discont,lat_us\n')
                 print(f"stats: logging per-frame rows to {csv_path}")
             except OSError as e:
                 print(f"stats: cannot open {csv_path}: {e}")
@@ -178,6 +385,25 @@ class StreamStats:
         self._T = None             # nominal frame period in ns, set by tick()
         self._tiny_thresh = None   # frame-size floor, set by tick()
         self.jitter_ns = 0.0       # RFC 3550 interarrival jitter
+        # End-to-end delay at the sink, in ns. last/min/max describe the current
+        # tick (min and max are reset by tick()); the floor is the lowest delay
+        # seen since this pipeline started and must survive every tick, since
+        # the whole diagnostic is current-versus-best.
+        # Receiver-side delay, in ns. See source B in the module docstring.
+        self.lat_last = None       # jb + dec for the most recent frame
+        self.lat_min = None        # per tick, reset by tick()
+        self.lat_max = None
+        self.lat_jb = None         # jitterbuffer queue depth, media time
+        self.lat_dec = None        # depayloader -> sink transit
+        # Newest RTP timestamp to arrive, and the one the jitterbuffer is
+        # currently releasing. Their difference is lat_jb; neither is ever used
+        # on its own, which is the whole point (no epoch, no clock rate).
+        self._rtp_in = None
+        self._rtp_out = None
+        self._ssrc = None          # the video SSRC, learned from the jb src pad
+        self.rtp_alien = 0         # packets on some other SSRC (a second stream)
+        self.ssrc_changes = 0      # a new sender, or the jitterbuffer re-locking
+        self._depay_push = None    # monotonic time of the last depay push
         self.frames = 0
         self.gaps = 0
         self.gap_slots = 0
@@ -210,8 +436,26 @@ class StreamStats:
 
     def attach(self, pipeline):
         self.detach()
+        udpsrc = _find_element(pipeline, 'udpsrc') if ENABLE_LATENCY else None
+        if udpsrc is not None:
+            try:
+                self._udp_port = int(udpsrc.get_property('port'))
+                q = _sock_queue(self._udp_port)
+                self._sock_drops0 = q[1] if q else None
+            except Exception:
+                self._udp_port = None
         depay = _find_element(pipeline, 'depay')
         self._jb = _find_element(pipeline, 'rtpjitterbuffer')
+        self._sink = _find_sink(pipeline)
+
+        if self._jb is not None:
+            # Only read for the delay budget -- a jitterbuffer configured for
+            # 100 ms is expected to cost 100 ms, and saying so keeps the `lat`
+            # field interpretable without knowing the SRC line by heart.
+            try:
+                self._jb_latency_ms = float(self._jb.get_property('latency'))
+            except Exception:
+                self._jb_latency_ms = None
 
         if self._jb is not None and ENABLE_DO_LOST:
             # Off by default: see the ENABLE_DO_LOST comment above. Without it
@@ -236,8 +480,46 @@ class StreamStats:
                                           self._on_event)))
         else:
             print("stats: no depayloader found -- FPS/jitter disabled")
+
         if self._jb is None:
-            print("stats: no rtpjitterbuffer in the pipeline -- loss counters disabled")
+            print("stats: no rtpjitterbuffer in the pipeline -- loss counters "
+                  "disabled")
+
+        if not ENABLE_LATENCY:
+            # Nothing below this point is installed, so the per-packet probes
+            # never run. See the ENABLE_LATENCY comment and
+            # latency_meter_tests.md.
+            return
+
+        if self._sink is not None:
+            # The sink pad, not a src pad: this must be the last point in the
+            # pipeline, after decode and colorspace conversion, or the delay it
+            # reports excludes exactly the stages most likely to stall.
+            pad = self._sink.get_static_pad('sink')
+            if pad is not None:
+                self._probes.append(
+                    (pad, pad.add_probe(Gst.PadProbeType.BUFFER,
+                                        self._on_sink_buffer)))
+        else:
+            print("stats: no sink found -- receiver-side delay disabled")
+
+        if self._jb is not None:
+            # Both jitterbuffer pads carry raw RTP, so the timestamp can be read
+            # straight out of the header. These are the only two probes that run
+            # per *packet* rather than per frame; they do nothing but read four
+            # bytes and store an int, which is what makes that affordable.
+            jbs = self._jb.get_static_pad('sink')
+            if jbs is not None:
+                self._probes.append(
+                    (jbs, jbs.add_probe(Gst.PadProbeType.BUFFER,
+                                        self._on_rtp_in)))
+            jbo = self._jb.get_static_pad('src')
+            if jbo is not None:
+                self._probes.append(
+                    (jbo, jbo.add_probe(Gst.PadProbeType.BUFFER,
+                                        self._on_rtp_out)))
+        else:
+            print("stats: no rtpjitterbuffer -- receiver-side delay disabled")
 
     def detach(self):
         for pad, pid in self._probes:
@@ -247,6 +529,9 @@ class StreamStats:
                 pass
         self._probes = []
         self._jb = None
+        self._sink = None
+        self._udp_port = None
+        self._sock_drops0 = None
 
     def close(self):
         self.detach()
@@ -265,6 +550,10 @@ class StreamStats:
             return Gst.PadProbeReturn.OK
 
         now = Gst.util_get_timestamp()
+        if ENABLE_LATENCY:
+            # Start of the decode+render leg, closed by _on_sink_buffer. Set
+            # before anything else so it cannot include this probe's own work.
+            self._depay_push = now
         pts = buf.pts
         has_pts = pts != Gst.CLOCK_TIME_NONE
         discont = buf.has_flags(Gst.BufferFlags.DISCONT)
@@ -344,7 +633,100 @@ class StreamStats:
             self.key_series.append(keyframe)
 
             if self._csv is not None and len(self._csv_rows) < CSV_BACKLOG_MAX:
-                self._csv_rows.append((now, dt_a, dt_s, d, discont))
+                # lat_us is the most recent sink-pad reading, i.e. the *previous*
+                # frame's -- this probe runs before the sink one for the frame in
+                # hand. One frame period of skew is immaterial for a signal whose
+                # whole point is that it steps by hundreds of ms and stays there.
+                self._csv_rows.append((now, dt_a, dt_s, d, discont,
+                                       self.lat_last))
+
+        return Gst.PadProbeReturn.OK
+
+    def _on_rtp_in(self, pad, info):
+        """Newest RTP timestamp to arrive from the air, for the video SSRC only.
+
+        Per RTP packet, so it does the least work of any probe here: read the
+        header, keep the newest value. Packets can arrive reordered, hence the
+        modular comparison rather than a plain `>`.
+        """
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+        hdr = _rtp_hdr(buf)
+        if hdr is None:
+            return Gst.PadProbeReturn.OK
+        ssrc, ts = hdr
+        if ssrc != self._ssrc:
+            # Either a second stream sharing the port (see _rtp_hdr) or the
+            # video SSRC before the jitterbuffer has emitted anything. Counted
+            # so the `alien` figure can say the port is carrying two streams,
+            # which is worth knowing: rtpjitterbuffer expects one.
+            self.rtp_alien += 1
+            return Gst.PadProbeReturn.OK
+        cur = self._rtp_in
+        if cur is None or 0 < ((ts - cur) % RTP_WRAP) < RTP_HALF:
+            self._rtp_in = ts
+        return Gst.PadProbeReturn.OK
+
+    def _on_rtp_out(self, pad, info):
+        """RTP timestamp the jitterbuffer is releasing right now.
+
+        This pad also defines which SSRC counts as the video: it is whatever the
+        jitterbuffer actually forwards to the decoder, so no caps parsing or
+        payload-type guesswork is needed. A change of SSRC is a new sender, and
+        invalidates the arrival side.
+        """
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+        hdr = _rtp_hdr(buf)
+        if hdr is None:
+            return Gst.PadProbeReturn.OK
+        ssrc, ts = hdr
+        if ssrc != self._ssrc:
+            self._ssrc = ssrc
+            self._rtp_in = None
+            self.ssrc_changes += 1
+        self._rtp_out = ts
+        return Gst.PadProbeReturn.OK
+
+    def _on_sink_buffer(self, pad, info):
+        """Receiver-side delay for the frame now reaching the display.
+
+        lat = jitterbuffer queue depth (media time, from the RTP timestamp
+        difference) + the monotonic transit from the depayloader to here. See
+        source B in the module docstring for why it is built this way and what
+        it does not include.
+        """
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+
+        rin, rout = self._rtp_in, self._rtp_out
+        if rin is None or rout is None:
+            return Gst.PadProbeReturn.OK
+        # Signed modular difference: normally positive (the newest arrival is
+        # ahead of what is being released), but it goes slightly negative right
+        # after a resync, and a negative delay is information, not an error.
+        d = (rin - rout) % RTP_WRAP
+        if d >= RTP_HALF:
+            d -= RTP_WRAP
+        jb = d * Gst.SECOND // RTP_CLOCK_HZ
+
+        # Lower bound on decode+convert+render: the chain below the jitterbuffer
+        # is one thread with no queue in it, so the frame the depayloader pushed
+        # last is normally this one. If the decoder holds frames internally this
+        # under-reports rather than drifting, which is the safer failure.
+        push = self._depay_push
+        dec = 0 if push is None else max(0, Gst.util_get_timestamp() - push)
+
+        lat = jb + dec
+        with self._lock:
+            self.lat_jb, self.lat_dec, self.lat_last = jb, dec, lat
+            if self.lat_min is None or lat < self.lat_min:
+                self.lat_min = lat
+            if self.lat_max is None or lat > self.lat_max:
+                self.lat_max = lat
 
         return Gst.PadProbeReturn.OK
 
@@ -382,6 +764,12 @@ class StreamStats:
         elapsed = now - self._last_tick
         self._last_tick = now
         jb = self._jb_read()          # touches GStreamer, so outside the lock
+        # The socket is not bound until the pipeline is PLAYING, i.e. after
+        # attach(), so the drops baseline is taken on the first read that works.
+        sockq = (_sock_queue(self._udp_port)
+                 if ENABLE_LATENCY and self._udp_port else None)
+        if sockq and self._sock_drops0 is None:
+            self._sock_drops0 = sockq[1]
 
         with self._lock:
             cutoff = now - PCT_WINDOW_NS
@@ -417,6 +805,13 @@ class StreamStats:
             self._j_hist.append(jitter_ms)
             peak_j = max(self._j_hist)
             last_arrival = self._last_arrival
+            # min/max are per-tick, so they are read and cleared together; last
+            # and floor persist. A tick with no frames leaves min/max at None,
+            # which the formatting renders as '--' rather than as a stale value.
+            lat = dict(last=self.lat_last, min=self.lat_min, max=self.lat_max,
+                       jb=self.lat_jb, dec=self.lat_dec,
+                       alien=self.rtp_alien, ssrc_changes=self.ssrc_changes)
+            self.lat_min = self.lat_max = None
             totals = dict(frames=self.frames, restarts=self.restarts,
                           miss=self.lost_frames + self.cam_stalls,
                           dup=self.dup_pts + self.jb_dup_total,
@@ -448,13 +843,14 @@ class StreamStats:
 
         snap = self._build(now, elapsed, window, T, cur, prev, oldest, totals,
                            jb, jitter_ms, peak_j, frozen_for, d_series,
-                           key_series)
+                           key_series, lat, sockq)
         self.latest = snap            # published for the OSD; never mutated
         print("[stats] " + self._console_line(snap))
         return True
 
     def _build(self, now, elapsed, window, T, cur, prev, oldest, totals, jb,
-               jitter_ms, peak_j, frozen_for, d_series, key_series):
+               jitter_ms, peak_j, frozen_for, d_series, key_series, lat,
+               sockq):
         """Assemble the published snapshot: values plus a severity per field.
 
         Thresholds live here and nowhere else, so the renderer stays dumb and
@@ -489,6 +885,47 @@ class StreamStats:
         miss10 = roll('lost_frames') + roll('cam_stalls')
         dup10 = roll('dup_pts') + roll('jb_dup')
 
+        # Receiver-side delay, in ms. Absolute values are meaningful here (see
+        # source B), so the budget is a straight comparison: what this pipeline
+        # ought to cost is the jitterbuffer's own latency plus a couple of
+        # frames of decode and render.
+        ms = lambda v: None if v is None else v / 1e6
+        lat_ms, lat_min, lat_max = ms(lat['last']), ms(lat['min']), ms(lat['max'])
+        lat_jb, lat_dec = ms(lat['jb']), ms(lat['dec'])
+        budget = None
+        if self._jb_latency_ms is not None or T_ms:
+            budget = (self._jb_latency_ms or 0.0) + LAT_BUDGET_FRAMES * T_ms
+
+        # The kernel socket queue, converted to time at the stream's own byte
+        # rate. Measured from the depayloader's output sizes, which is the
+        # compressed payload and so ~1% under the wire rate -- immaterial next
+        # to a queue that is either empty or holds a large fraction of a second.
+        sock_b = sockq[0] if sockq else None
+        sock_drops = None
+        if sockq and self._sock_drops0 is not None:
+            sock_drops = sockq[1] - self._sock_drops0
+        byte_rate = None
+        if window:
+            span = window[-1][0] - window[0][0]
+            if span > 0:
+                byte_rate = sum(z for _t, _a, _s, _d, z in window) * (
+                    Gst.SECOND / float(span))
+        sock_ms = None
+        if sock_b is not None:
+            sock_ms = (1000.0 * sock_b / byte_rate) if byte_rate else 0.0
+
+        # Total receiver-side delay: the socket queue nothing in the pipeline
+        # can see, plus what the pipeline itself is holding.
+        total = None if lat_ms is None else lat_ms + (sock_ms or 0.0)
+        total_min = None if lat_min is None else lat_min + (sock_ms or 0.0)
+
+        # Judged on the tick's minimum, not its last frame: a single late frame
+        # is jitter, a minimum that has moved up is backlog the pipeline is not
+        # giving back.
+        over = None
+        if total_min is not None and budget:
+            over = total_min - budget
+
         snap = {
             'fps': fps,
             'fps_sev': _sev(abs(fps - nominal) / nominal, 0.05, 0.15) if nominal else 0,
@@ -505,6 +942,19 @@ class StreamStats:
             'clk': clk,
             'clk_sev': 0 if clk is None or 0.98 <= clk <= 1.02
                        else (1 if 0.95 <= clk <= 1.05 else 2),
+            'lat': total,
+            'lat_min': total_min,
+            'lat_max': None if lat_max is None else lat_max + (sock_ms or 0.0),
+            'lat_jb': lat_jb,
+            'lat_dec': lat_dec,
+            'lat_sock': sock_ms,
+            'lat_sock_b': sock_b,
+            'sock_drops': sock_drops,
+            'lat_budget': budget,
+            'lat_over': over,
+            'lat_sev': 0 if over is None else _sev(over, LAT_WARN_MS, LAT_BAD_MS),
+            'alien': lat['alien'],
+            'ssrc_changes': lat['ssrc_changes'],
             'd50': _pct(d_ms, 50), 'd95': _pct(d_ms, 95), 'd05': _pct(d_ms, 5),
             'gap': delta('gaps'), 'gap_slots': delta('gap_slots'),
             'lost_frame': delta('lost_frames'), 'cam_stall': delta('cam_stalls'),
@@ -524,6 +974,7 @@ class StreamStats:
         }
         snap['sev'] = max(snap['fps_sev'], snap['jit_sev'], snap['stut_sev'],
                           snap['miss_sev'], snap['dup_sev'], snap['clk_sev'],
+                          snap['lat_sev'],
                           2 if snap['frozen'] is not None else 0)
         return snap
 
@@ -536,10 +987,34 @@ class StreamStats:
                       f"dup {jb.get('dup', 0)} jb-J {jb.get('jitter_ms', 0):.2f}ms "
                       f"evt {s['evt']}")
         clk = f"{s['clk']:.3f}" if s['clk'] is not None else " -- "
+        # last / tick minimum / tick maximum, then the three legs it is made of
+        # and the budget the minimum is judged against. sock is the kernel
+        # receive queue and jb the jitterbuffer's own depth -- between them, the
+        # only two places a full second of backlog can hide; dec is decode and
+        # render, normally a fraction of a millisecond.
+        lat_txt = ""
+        if s['lat'] is not None:
+            lat_txt = (f"lat {_f(s['lat'])}/{_f(s['lat_min'])}/{_f(s['lat_max'])}ms"
+                       f" sock {_f(s['lat_sock'], 6)} jb {_f(s['lat_jb'], 6)}"
+                       f" dec {_f(s['lat_dec'], 4)}"
+                       f" bud {_f(s['lat_budget'], 5)}"
+                       f" over {_f(s['lat_over'], 6)}")
+            if s['sock_drops']:
+                # The kernel dropped datagrams because the queue was full, i.e.
+                # the reader stalled long enough to overflow it.
+                lat_txt += f" SOCK-DROP {s['sock_drops']}"
+            if s['alien']:
+                # A second RTP stream on the same port. Not a latency figure,
+                # but it belongs next to one: rtpjitterbuffer is built for a
+                # single SSRC, and a foreign one makes it re-lock.
+                lat_txt += f" alien {s['alien']}"
+            if s['ssrc_changes'] > 1:
+                lat_txt += f" ssrc-chg {s['ssrc_changes']}"
         parts = [
             f"fps {s['fps']:5.1f} (nom {s['nom']:4.1f})",
             f"clk {clk}",
             f"J {s['jit']:5.2f}ms pk {s['jit_peak']:5.2f}",
+            lat_txt,
             f"stut {s['stut']:4.1f}%",
             f"D p50 {s['d50']:+6.1f} p95 {s['d95']:+6.1f} p05 {s['d05']:+6.1f}",
             f"gap {s['gap']} (slots {s['gap_slots']}) "
@@ -595,13 +1070,14 @@ class StreamStats:
             return
         try:
             self._csv.writelines(
-                "%d,%d,%s,%s,%d\n" % (
+                "%d,%d,%s,%s,%d,%s\n" % (
                     t // 1000000,
                     dt_a // 1000,
                     '' if dt_s is None else dt_s // 1000,
                     '' if d is None else d // 1000,
-                    1 if disc else 0)
-                for t, dt_a, dt_s, d, disc in rows)
+                    1 if disc else 0,
+                    '' if lat is None else lat // 1000)
+                for t, dt_a, dt_s, d, disc, lat in rows)
         except Exception as e:
             print(f"stats: csv write failed: {e}")
             self._csv = None
