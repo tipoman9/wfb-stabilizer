@@ -134,17 +134,20 @@ SRC = (
 #command_string = 'gnome-terminal -e \'/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD\''
 #command_string = '/home/home/qopenhd.sh transparent'
 
-#Path to qOpenHD to start it and bring it to front to get OSD , empty if not
-OSDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
-#qOpenHDexecutable = ""
+#OSD app to start and bring to front on top of the video, empty if none.
+#Selected from the command line: no argument = no OSD, 'qopenhd', 'msposd'
+OSDexecutable = ""
+#Path to qOpenHD, started with the 'qopenhd' argument
+qOpenHDexecutable = '/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/QOpenHD'
 qOpenHDdir='/home/home/qopenhd25/build-QOpenHD-Desktop_Qt_5_15_2_GCC_64bit-Debug/debug/'
 
 #set lower refresh rate of msposd to free some resources for OpenCV drawing
+# AHI is always drawn and never skipped, so it is not affected by the refresh rate. The matrix is drawn only when there is a change in the data, so it is also not affected by the refresh rate.
 MSPOSDexecutable = [
     "/home/home/src/msposd/msposd",
     "--master", "127.0.0.1:14550",   	
     "--osd",
-    "-r", "120",
+    "-r", "10",
     "--ahi", "4",
     "--matrix", "11"
     #,"-v"
@@ -157,8 +160,6 @@ sed_commands = (#set qOpenHD to h264 to free cpu
     "sed -i 's/^dev_force_show_full_screen=.*/dev_force_show_full_screen=true/' /home/home/.config/OpenHD/QOpenHD.conf &&"
     "sed -i 's/^qopenhd_primary_video_rtp_input_port=.*/qopenhd_primary_video_rtp_input_port=5599/' /home/home/.config/OpenHD/QOpenHD.conf"
 )
- 
-subprocess.run(sed_commands, shell=True)
 
 #not needed , tested only
 def set_cpu_affinity(core_number):
@@ -425,6 +426,10 @@ if len(sys.argv) >= 2 and sys.argv[1].lower()=="noosd" :
 	OSDexecutable="" # StopqOPenHD
 	win = wfbOSDWindow() # Show my stats window
 
+if len(sys.argv) >= 2 and sys.argv[1].lower()=="qopenhd" :
+	subprocess.run(sed_commands, shell=True)
+	OSDexecutable = qOpenHDexecutable
+
 if len(sys.argv) >= 2 and sys.argv[1].lower()=="msposd" :
 	#qOpenHDexecutable="/home/home/src/msposd/msposd  --master 127.0.0.1:14550 --baudrate 115200 --osd -r 50 --ahi 3 --matrix 11 -v"
 	OSDexecutable=""
@@ -466,7 +471,7 @@ def display_frames():
 		with frame_lock:
 			if shared_frame is not None:
 				frame = shared_frame  #.copy()  # no need to copy??!! 
-				#No one will mess with this frame when it is ready, the new frame will be copied over it only after warpAffine2, which is the last step of frame stabilization
+				#No one will mess with this frame when it is ready, the new frame will be copied over it only after warpAffine, which is the last step of frame stabilization
 
 		if frame is not None:			
 			if True: #frames_ttl%1==16:
@@ -673,16 +678,27 @@ while True:
 			m[1,2] = dy
 			#DoFrameCalc
 
-		fS = cv2.warpAffine(prevOrig, m, (res_w_orig,res_h_orig)) # apply magic stabilizer sauce to frame
+		# Fold the zoom into the stabilization matrix so the full frame is warped only once.
+		# A second full-frame warpAffine costs ~2ms and a full frame of memory traffic, even when zoomFactor is 1
+		# This only changes the displayed image: feature detection/tracking use prevGray/currGray from the raw
+		# frames, and m (also kept as lastRigidTransform) is not modified, so tracking accuracy is unaffected.
+		# zoomFactor=1 gives pixel-identical output; other zooms differ only by interpolation rounding (one pass instead of two).
+		# To restore the previous two-pass version, replace this block up to i(f"warpAffine passed") with:
+		#	fS = cv2.warpAffine(prevOrig, m, (res_w_orig,res_h_orig))
+		#	s = fS.shape
+		#	T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, zoomFactor)
+		#	f_stabilized = cv2.warpAffine(fS, T, (s[1], s[0]))
+		warpM = m
+		if zoomFactor != 1:
+			T = cv2.getRotationMatrix2D((res_w_orig/2, res_h_orig/2), 0, zoomFactor)
+			warpM = T @ np.vstack([m, [0, 0, 1]])
+		f_stabilized = cv2.warpAffine(prevOrig, warpM, (res_w_orig,res_h_orig)) # apply magic stabilizer sauce to frame
 		i(f"warpAffine passed")
-		s = fS.shape
-		T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, zoomFactor)		
-		f_stabilized = cv2.warpAffine(fS, T, (s[1], s[0]))
 
 		if cropping_percent>0:
 			f_stabilized = crop_and_overlay(f_stabilized,cropping_percent)
 
-		i(f"warpAffine2 passed")
+		i(f"cropped")
 	else :
 		f_stabilized=Orig
 	PosY=16;

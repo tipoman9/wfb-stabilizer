@@ -19,11 +19,31 @@ Requires: Python, OpenCV-python, gstreamer and probably other libraries I forgot
     Windows - Install python from the windows app store then open a command prompt and run 'pip install opencv-python'
 
 
-Included in this repo is a test shaky video. To test run:
+The default SRC listens for an RTP H.265 stream (payload 97) on UDP port 5600. Edit the file and set the SRC variable to match your own streaming source.
 
-python ejo_wfb_stabilizer.py UnstabilizedTest10sec.mp4
+## Testing with a recorded video
 
-...or edit the file and set the SRC variable to your own streaming source.
+`replay_stream.py` sends a recorded HEVC .mov/.mp4 to UDP port 5600 as an RTP H.265 stream (payload 97), the same as a live wfb-ng feed, so the stabilizer can be tested without a drone. The video is not re-encoded and is played at its recorded frame rate.
+
+1. In one terminal, start the replay (loops seamlessly until Ctrl+C):
+
+   ```
+   python3 replay_stream.py ~/Video/vid2209_1735_40_shaking.mov
+   ```
+
+   Options: `--once` to play once, `--host` / `--port` to send to another machine or port.
+
+2. In another terminal, start the stabilizer the way you normally run it, e.g.:
+
+   ```
+   python3 ejo_wfb_stabilizer.py msposd
+   ```
+
+3. Press S or Space to turn stabilization on (it starts off). The FPS shown on the video and the per-step timing table printed to the console every second show whether the stabilizer keeps up; "Skipped frame" lines are frames it dropped.
+
+Notes:
+- Replay one recording per run. Switching between recordings made with different encoder settings in the same stream can make vaapih265dec abort.
+- The included UnstabilizedTest10sec.mp4 is H.264, so it does not match the default H.265 SRC.
 
 
 <hr>
@@ -39,6 +59,7 @@ My groundstation PC has a nvidia gpu and opencv compiled with cuda support and c
 ## TipoMan EDIT 2024 
 Added a separate thread for video processing, increased performance by 25%.
 OSD overlay (qOpenHD or msposd) will be started and brought to foreground, so that OSD is drawn.
+Select it with the first argument: no argument = video only, no OSD; `msposd`; `qopenhd`; `noosd` = wfb-ng link stats window only.
 Overloading and video jitter  won't cause total image loss or latency , instead FPS will gradually decrease to the value the system can process.
 
 ## Hotkeys
