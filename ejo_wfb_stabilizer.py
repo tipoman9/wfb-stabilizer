@@ -40,21 +40,23 @@ from gi.repository import Gtk
 #showFullScreen = 1
 showFullScreen = 1
 
-# Decreases stabilization latency at the expense of accuracy. Set to 1 if no downsamping is desired. 
-# Example: downSample = 0.5 is half resolution and runs faster but gets jittery
+# Resolution used for feature tracking (not switchable at runtime). Set to 1 if no downsamping is desired.
+# On 1080p test clips downSample = 0.5 tracked as accurately as 1 (0.72 vs 0.69 px median error) at ~1/3 of the cost.
+# 1 may still help on low resolution or low texture video (untested)
 #downSample = 1
 downSample = 0.5
 
 #Zoom in so you don't see the frame bouncing around. zoomFactor = 1 for no zoom
 zoomFactor = 1 #0.9
 
-# pV and mV can be increased for more smoothing #### start with pV = 0.01 and mV = 2 
-processVar=0.03
+# Smoothing: only the ratio processVar/measVar matters. Lower processVar = smoother, but the picture lags deliberate turns more.
+# TAB toggles Fast (processVarFast, lower stabilization latency) and Slow (processVarSlow, smoother).
+# Measured on a 1080p 57fps clip: Fast removes ~53% of the shake with ~134ms lag, Slow ~62% with ~200ms lag.
+# The filter works per frame, so the lag in ms grows at lower fps.
+processVarFast=0.03
+processVarSlow=processVarFast/2
+processVar=processVarFast
 measVar=2
-
-#for downSample = 0.5
-#processVar=0.010
-#measVar=8
 
 
 # If test video plays too fast then increase this until it looks close enough. Varies with hardware. 
@@ -116,11 +118,23 @@ cropping_percent=0
 #SRC = 'udpsrc port=5600 buffer-size=65536 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 #SRC = 'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! rtpjitterbuffer latency=100 mode=0 max-misorder-time=200 max-dropout-time=100 max-rtcp-rtp-time-diff=100 ! rtph265depay ! queue max-size-buffers=1 ! vaapih265dec ! videoconvert ! appsink sync=false '
 #this will drop frames when video fps is higher than supported
+#SRC = (
+#     'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, '
+#     'clock-rate=(int)90000, encoding-name=(string)H265" ! '
+#     'rtpjitterbuffer latency=50 mode=0 ! '
+#     'rtph265depay ! queue ! vaapih265dec ! videoconvert ! '
+#     'appsink sync=false drop=true max-buffers=1'
+#)
+# When the PC can't keep up, frames must be dropped, not queued. With the version above, the queue before the decoder
+# (up to 1s) and the jitterbuffer (unlimited) stored the backlog, so under load (msposd, recorder) the video fell
+# seconds behind and never caught up. Now decoded frames are dropped if colour conversion falls behind, and the
+# jitterbuffer drops packets older than its latency. buffer-size: the default ~200KB socket buffer overflowed on
+# large frames and lost packets (needs net.core.rmem_max >= 4000000, otherwise the kernel caps it).
 SRC = (
-     'udpsrc port=5600 caps="application/x-rtp, payload=97, media=(string)video, '
+     'udpsrc port=5600 buffer-size=4000000 caps="application/x-rtp, payload=97, media=(string)video, '
      'clock-rate=(int)90000, encoding-name=(string)H265" ! '
-     'rtpjitterbuffer latency=50 mode=0 ! '
-     'rtph265depay ! queue ! vaapih265dec ! videoconvert ! '
+     'rtpjitterbuffer latency=50 mode=0 drop-on-latency=true ! '
+     'rtph265depay ! vaapih265dec ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert ! '
      'appsink sync=false drop=true max-buffers=1'
 )
 
@@ -181,10 +195,10 @@ def set_cpu_affinity(core_number):
     except Exception as e:
         print(f"Error: {e}")
 
-ScaleModeRequest=downSample
+ScaleModeRequest=downSample # used by SetScaleMode(), not switched at runtime now
 #Global key hook handler
 def on_press(key):
-	global AbortNow, enableStabization, cropping_percent,ScaleModeRequest, count
+	global AbortNow, enableStabization, cropping_percent, processVar, Q, count
 	try:
 		#print(f'Key {key.char} pressed')
 		if key.char.lower() == 'q' or key == keyboard.Key.esc: 
@@ -202,8 +216,11 @@ def on_press(key):
 			enableStabization = not enableStabization			
 		if key == keyboard.Key.esc:
 			AbortNow = True
-		if key == keyboard.Key.tab: 			
-			ScaleModeRequest = 0.5 if ScaleModeRequest == 1 else 1
+		if key == keyboard.Key.tab:
+			# Switch smoothing strength, the filter keeps its state so the picture does not jump
+			processVar = processVarSlow if processVar == processVarFast else processVarFast
+			Q = np.array([[processVar]*3])
+			print(f"Stabilization smoothing: processVar={processVar}")
 			
 
 def on_release(key):
@@ -318,7 +335,42 @@ def drawtextSimple(surface, str, x, y, font_color = (0, 0, 127),font_scale = 0.6
 
 	cv2.putText(surface, str, position, font, font_scale, font_color, thickness)
 
+# Text is drawn the way wfb_osd.py draws the wfb-ng stats: Cairo, DejaVu Sans Mono, the text path stroked
+# 3px black (alpha 0.9) and then filled. Each text is rendered once and cached, so most frames only blend
+# a small patch (~0.06ms for all stats). Falls back to the Hershey font if pycairo is missing.
+try:
+	import cairo
+except ImportError:
+	cairo = None
+text_cache = {}
+
 def drawtext(surface, str, x, y, font_color=(0, 222, 64), font_scale=0.6, outline_color=(0, 0, 0), outline_thickness=2):
+	if cairo is not None:
+		key = (str, font_color)
+		if key not in text_cache:
+			if len(text_cache) > 300: # FPS and lag values keep changing
+				text_cache.clear()
+			size = 16 # same letter height as the Hershey font below
+			measure = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+			measure.select_font_face("DejaVu Sans Mono"); measure.set_font_size(size)
+			w = int(measure.text_extents(str).x_advance) + 8; h = int(size * 1.5); base = int(size * 1.1)
+			surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h); cr = cairo.Context(surf)
+			cr.select_font_face("DejaVu Sans Mono"); cr.set_font_size(size)
+			cr.set_line_join(cairo.LINE_JOIN_ROUND) # the default miter join leaves spikes on N, + etc.
+			cr.move_to(3, base); cr.text_path(str)
+			cr.set_source_rgba(outline_color[2]/255, outline_color[1]/255, outline_color[0]/255, 0.9)
+			cr.set_line_width(3); cr.stroke_preserve()
+			cr.set_source_rgb(font_color[2]/255, font_color[1]/255, font_color[0]/255); cr.fill()
+			surf.flush()
+			bgra = np.ndarray((h, surf.get_stride() // 4, 4), np.uint8, surf.get_data())[:, :w] # premultiplied BGRA
+			text_cache[key] = (bgra[:, :, :3].astype(np.float32), 1 - bgra[:, :, 3:4].astype(np.float32) / 255, base)
+		col, inv_alpha, base = text_cache[key]
+		top, left = y - base, x - 3
+		ct, cl = max(0, -top), max(0, -left) # clip the patch at the frame edges
+		roi = surface[top + ct:top + col.shape[0], left + cl:left + col.shape[1]]
+		h, w = roi.shape[:2]
+		roi[:] = roi * inv_alpha[ct:ct + h, cl:cl + w] + col[ct:ct + h, cl:cl + w]
+		return
 	#font = cv2.FONT_HERSHEY_DUPLEX
 	#font = cv2.FONT_HERSHEY_SIMPLEX
 	font = cv2.FONT_HERSHEY_PLAIN
@@ -330,6 +382,7 @@ def drawtext(surface, str, x, y, font_color=(0, 222, 64), font_scale=0.6, outlin
 	cv2.putText(surface, str, position, font, font_scale, outline_color, outline_thickness, cv2.LINE_AA)
 	# Draw main text (normal thickness)
 	cv2.putText(surface, str, position, font, font_scale, font_color, thickness, cv2.LINE_AA)
+
 
 
 # A basic attempt to do cropping, may slow down, needs optimization
@@ -400,6 +453,7 @@ x = 0
 y = 0
 Q = np.array([[processVar]*3])
 R = np.array([[measVar]*3])
+K = None # Kalman gain of the last frame, used to show the smoothing lag
 K_collect = []
 P_collect = []
 prevFrame = None
@@ -515,6 +569,9 @@ def Scale_Coordinates(showPts, multiplier):
 
     return showPts
 
+# Runtime switching of the tracking resolution (downSample 0.5 <-> 1), currently not used: TAB switches the smoothing instead.
+# To use it again: set ScaleModeRequest from a key handler (e.g. ScaleModeRequest = 0.5 if ScaleModeRequest == 1 else 1)
+# and uncomment the SetScaleMode() call in the main loop. Note it also rescales Q and R by downSample.
 def SetScaleMode():	
 	global dx, dy, da , x , y , a, X_estimate,P_estimate,prevPts,prevGray,currGray,downSample,ScaleModeRequest,downSample,Q,R,prevFrame
 	#need to change these params to keep the same processing
@@ -526,10 +583,15 @@ def SetScaleMode():
 		X_estimate = np.zeros((1,3), dtype="float") ; P_estimate = np.ones((1,3), dtype="float") ;prevPts=None
 		prevGray=None; currGray=None ; prevFrame=None
 print("Waiting for video stream...")
-while True:	
+frame_interval = 1/60 # smoothed time between processed frames, used to show the smoothing lag in ms
+last_loop_time = time.time()
+while True:
 	#grab, frame = video.read()
 	i(f"Frame start",1)   #debug_step:1 : {time.time():.3f}
 	startedwaiting4frame=time.time()
+	if startedwaiting4frame - last_loop_time < 0.5: # ignore stream stalls
+		frame_interval = 0.95 * frame_interval + 0.05 * (startedwaiting4frame - last_loop_time)
+	last_loop_time = startedwaiting4frame
 	overloaded=True;
 	frames_ttl+=1
 
@@ -570,9 +632,9 @@ while True:
 	i(f"retrieved")
 
 	if grab is not True:
-		exit() 
-	if enableStabization :
-		SetScaleMode()
+		exit()
+	#if enableStabization :
+	#	SetScaleMode()
 	res_w_orig = frame.shape[1]
 	res_h_orig = frame.shape[0]
 	res_w = int(res_w_orig * downSample)
@@ -708,11 +770,15 @@ while True:
 	if dropped_frames_screen>0:
 		drawtext(f_stabilized, f"({dropped_frames_screen})",286 + offsetX,PosY,(0, 32, 255))
 	drawtext(f_stabilized, f"@{stab_load_screen:.0f}%",330 + offsetX,PosY) #f"@{stab_load_screen:.0f}/{stab_load_screen2:.0f}%"
-	
-	
+
+
 	drawtext(f_stabilized, f"Stab:"  + ("ON" if enableStabization == True else "OFF"),400 + offsetX,PosY, (0, 32, 255) if enableStabization == True else (0, 128, 192))
-	if enableStabization == True:
-		drawtext(f_stabilized, f":"+ ("Slow" if downSample == 1 else "Fast"),480 + offsetX,PosY)
+	if enableStabization == True and K is not None:
+		# Smoothing lag: how long the stabilized view trails a deliberate turn, (1-K)/K frames for this filter.
+		# The picture itself is additionally ~1 frame + processing time older, since the previous frame is shown.
+		lag_ms = (1 - K[0,0]) / K[0,0] * frame_interval * 1000
+		mode = "A" if processVar == processVarFast else "B" # A = Fast, B = Slow (TAB)
+		drawtext(f_stabilized, f"{mode} +{lag_ms:.0f}ms",490 + offsetX,PosY)
 	#frameslag=frame_queue.qsize()
 	#if frameslag>0:
 	#	drawtext(f_stabilized, f"FramesLag:"+ f"{frameslag}",770 + offsetX,PosY)

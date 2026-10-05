@@ -68,7 +68,7 @@ ESC or Q - exit and close qOpenHD
 
 On a i3-1215u can stabilize 1920x1080 at 50fps (40fps on Battery power), while recording h264 30fps video from the screen.
 SPACE - Turn on/off stabilization
-TAB - toggle stab mode Fast/Slow
+TAB - toggle stabilization smoothing: lighter smoothing with less lag behind deliberate turns, or smoother but lagging more (processVarFast / processVarSlow in the script). The overlay shows the mode (A = Fast, B = Slow) and the resulting lag, e.g. A +134ms
 ESC - Quit
 
 WARNING, you may need to build OpenCV with GSTREAMER support : https://docs.opencv.org/3.4/d2/de6/tutorial_py_setup_in_ubuntu.html
